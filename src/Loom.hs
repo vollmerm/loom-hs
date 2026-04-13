@@ -1,12 +1,25 @@
 module Loom
   ( Arr
+  , Ix1
+  , Ix2
+  , Sh1
+  , Sh2
   , Prog
   , Reducer
   , RedVar
   , AccVar
+  , ix1
+  , ix2
+  , sh1
+  , sh2
   , newArr
   , fromList
   , toList
+  , unIx1
+  , unIx2
+  , withIx2
+  , index1
+  , index2
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -14,6 +27,8 @@ module Loom
   , parallel
   , barrier
   , parFor
+  , parForSh1
+  , parForSh2
   , parFor2
   , readArr
   , writeArr

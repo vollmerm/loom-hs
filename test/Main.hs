@@ -9,6 +9,8 @@ import Loom
 main :: IO ()
 main = do
   testArrayUpdate
+  testIndexHelpers
+  testShapeLoop1D
   testReducerSum
   testAccumFor
   testParallelReducerScope
@@ -26,6 +28,23 @@ testArrayUpdate = do
       writeArr arr i (x + 1)
   xs <- toList arr
   assertEqual "array update" [2, 3, 4, 5] xs
+
+testIndexHelpers :: IO ()
+testIndexHelpers = do
+  assertEqual "unIx1" 3 (unIx1 (ix1 3))
+  assertEqual "unIx2" (2, 1) (unIx2 (ix2 2 1))
+  assertEqual "index1" 4 (index1 (sh1 8) (ix1 4))
+  assertEqual "index2" 9 (index2 (sh2 3 4) (ix2 2 1))
+
+testShapeLoop1D :: IO ()
+testShapeLoop1D = do
+  let shape = sh1 6
+  arr <- newArr 6
+  runProg $
+    parForSh1 shape $ \ix ->
+      writeArr arr (index1 shape ix) (unIx1 ix * 2)
+  xs <- toList arr
+  assertEqual "shape loop 1d" [0, 2, 4, 6, 8, 10] xs
 
 testReducerSum :: IO ()
 testReducerSum = do
@@ -93,18 +112,19 @@ testMatrixMultiply = do
   let rowsA = 2
       colsA = 3
       colsB = 2
+      outShape = sh2 rowsA colsB
   a <- fromList [1, 2, 3, 4, 5, 6 :: Int]
   b <- fromList [7, 8, 9, 10, 11, 12 :: Int]
   c <- newArr (rowsA * colsB)
   runProg $
     parallel $
-      parFor2 rowsA colsB $ \i j ->
-        do
+      parForSh2 outShape $ \outIx ->
+        withIx2 outIx $ \i j -> do
           total <- accumFor colsA 0 $ \sumVar k -> do
             lhs <- readArr a (i * colsA + k)
             rhs <- readArr b (k * colsB + j)
             pure (sumVar + lhs * rhs)
-          writeArr c (i * colsB + j) total
+          writeArr c (index2 outShape outIx) total
   xs <- toList c
   assertEqual "matrix multiply" [58, 64, 139, 154] xs
 

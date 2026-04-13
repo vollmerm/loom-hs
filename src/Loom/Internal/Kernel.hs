@@ -4,13 +4,26 @@
 
 module Loom.Internal.Kernel
   ( Arr
+  , Ix1
+  , Ix2
+  , Sh1
+  , Sh2
   , Prog
   , Reducer
   , RedVar
   , AccVar
+  , ix1
+  , ix2
+  , sh1
+  , sh2
   , newArr
   , fromList
   , toList
+  , unIx1
+  , unIx2
+  , withIx2
+  , index1
+  , index2
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -18,6 +31,8 @@ module Loom.Internal.Kernel
   , parallel
   , barrier
   , parFor
+  , parForSh1
+  , parForSh2
   , parFor2
   , readArr
   , writeArr
@@ -61,6 +76,14 @@ import Data.Primitive.Types (Prim)
 import GHC.Conc (getNumCapabilities)
 
 data Arr a = Arr !Int !(MutablePrimArray RealWorld a)
+
+newtype Ix1 = Ix1 Int
+
+data Ix2 = Ix2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+
+newtype Sh1 = Sh1 Int
+
+data Sh2 = Sh2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
 data ReducerSpec rep a = ReducerSpec
   { reducerInit :: !rep
@@ -354,6 +377,42 @@ toList arr = go 0
 runProg :: Prog a -> IO a
 runProg (Prog m) = runKernel (m pure) (Runtime Nothing Nothing 0)
 
+{-# INLINE ix1 #-}
+ix1 :: Int -> Ix1
+ix1 = Ix1
+
+{-# INLINE ix2 #-}
+ix2 :: Int -> Int -> Ix2
+ix2 = Ix2
+
+{-# INLINE sh1 #-}
+sh1 :: Int -> Sh1
+sh1 = Sh1
+
+{-# INLINE sh2 #-}
+sh2 :: Int -> Int -> Sh2
+sh2 = Sh2
+
+{-# INLINE unIx1 #-}
+unIx1 :: Ix1 -> Int
+unIx1 (Ix1 i) = i
+
+{-# INLINE unIx2 #-}
+unIx2 :: Ix2 -> (Int, Int)
+unIx2 (Ix2 i j) = (i, j)
+
+{-# INLINE withIx2 #-}
+withIx2 :: Ix2 -> (Int -> Int -> r) -> r
+withIx2 (Ix2 i j) f = f i j
+
+{-# INLINE index1 #-}
+index1 :: Sh1 -> Ix1 -> Int
+index1 (Sh1 _) (Ix1 i) = i
+
+{-# INLINE index2 #-}
+index2 :: Sh2 -> Ix2 -> Int
+index2 (Sh2 _ n) (Ix2 i j) = i * n + j
+
 {-# INLINE parallel #-}
 parallel :: Prog a -> Prog a
 parallel body = Prog $ \k -> loopParallel (unProg body k)
@@ -370,11 +429,23 @@ parFor n body = Prog $ \k -> do
   loopParFor n (\i -> unProg (body i) (\() -> pure ()))
   k ()
 
+{-# INLINE parForSh1 #-}
+parForSh1 :: Sh1 -> (Ix1 -> Prog ()) -> Prog ()
+parForSh1 (Sh1 n) body = Prog $ \k -> do
+  loopParFor n (\i -> unProg (body (Ix1 i)) (\() -> pure ()))
+  k ()
+
+{-# INLINE parForSh2 #-}
+parForSh2 :: Sh2 -> (Ix2 -> Prog ()) -> Prog ()
+parForSh2 (Sh2 n m) body = Prog $ \k -> do
+  loopParFor2 n m (\i j -> unProg (body (Ix2 i j)) (\() -> pure ()))
+  k ()
+
 {-# INLINE parFor2 #-}
 parFor2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
-parFor2 n m body = Prog $ \k -> do
-  loopParFor2 n m (\i j -> unProg (body i j) (\() -> pure ()))
-  k ()
+parFor2 n m body =
+  parForSh2 (Sh2 n m) $ \ix ->
+    withIx2 ix body
 
 {-# INLINE readArr #-}
 readArr :: Prim a => Arr a -> Int -> Prog a
