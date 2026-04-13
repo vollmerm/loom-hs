@@ -5,6 +5,7 @@ module Loom.Benchmark.Kernels
   ( Benchmark (..)
   , benchmarks
   , lookupBenchmark
+  , runMatMulExample
   , runWavefrontEditDistanceExample
   , runRedBlackStencilExample
   , runThreePhaseNormalizeExample
@@ -172,35 +173,24 @@ runDot env =
 runMatMul :: MatrixEnv -> IO Int
 runMatMul env = do
   let n = matrixDim env
-      shape = sh2 n n
   out <- newArr (n * n)
-  runProg $
-    parallel $
-      parForSh2 shape $ \outIx ->
-        withIx2 outIx $ \i j -> do
-          total <- accumFor n 0 $ \acc k -> do
-            lhs <- readArr (matrixLeft env) (i * n + k)
-            rhs <- readArr (matrixRight env) (k * n + j)
-            pure (acc + lhs * rhs)
-          writeArr out (index2 shape outIx) total
+  runMatMulKernel n (matrixLeft env) (matrixRight env) out
   sampleMatrix out n
 
 runTiledMatMul :: MatrixEnv -> IO Int
 runTiledMatMul env = do
   let n = matrixDim env
-      shape = sh2 n n
-      tile = max 1 (min 32 n)
   out <- newArr (n * n)
-  runProg $
-    parallel $
-      tile2D tile tile shape $ \row0 col0 ->
-        parForTile2D tile tile row0 col0 shape $ \i j -> do
-          total <- accumFor n 0 $ \acc k -> do
-            lhs <- readArr (matrixLeft env) (i * n + k)
-            rhs <- readArr (matrixRight env) (k * n + j)
-            pure (acc + lhs * rhs)
-          writeArr out (i * n + j) total
+  runTiledMatMulKernel n (matrixLeft env) (matrixRight env) out
   sampleMatrix out n
+
+runMatMulExample :: Int -> [Int] -> [Int] -> IO [Int]
+runMatMulExample n xs ys = do
+  left <- fromList xs
+  right <- fromList ys
+  out <- newArr (n * n)
+  runMatMulKernel n left right out
+  toList out
 
 runWavefrontEditDistance :: EditDistanceEnv -> IO Int
 runWavefrontEditDistance env = do
@@ -263,6 +253,48 @@ runSeparableBlurExample n xs = do
   out <- newArr (n * n)
   runSeparableBlurKernel n src out
   toList out
+
+runMatMulKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
+runMatMulKernel n left right out =
+  runProg $
+    parallel $
+      parFor n $ \i ->
+        stripMine vecWidth n
+          (\j0 -> writeMatMulVecChunk n left right out i j0)
+          (\j -> writeMatMulScalarCell n left right out i j)
+
+runTiledMatMulKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
+runTiledMatMulKernel n left right out =
+  runProg $
+    parallel $
+      tile2D tile tile (sh2 n n) $ \row0 col0 -> do
+        let rowLimit = min n (row0 + tile)
+            colLimit = min n (col0 + tile)
+            rowCount = rowLimit - row0
+            colCount = colLimit - col0
+        parFor rowCount $ \i0 -> do
+          let i = row0 + i0
+          stripMine vecWidth colCount
+            (\j0 -> writeMatMulVecChunk n left right out i (col0 + j0))
+            (\j -> writeMatMulScalarCell n left right out i (col0 + j))
+  where
+    tile = max 1 (min 32 n)
+
+writeMatMulVecChunk :: Int -> Arr Int -> Arr Int -> Arr Int -> Int -> Int -> Prog ()
+writeMatMulVecChunk n left right out i j0 = do
+  total <- accumFor n (broadcastVec 0) $ \acc k -> do
+    lhs <- readArr left (i * n + k)
+    rhs <- readVec right (k * n + j0)
+    pure (addVec acc (mulVec (broadcastVec lhs) rhs))
+  writeVec out (i * n + j0) total
+
+writeMatMulScalarCell :: Int -> Arr Int -> Arr Int -> Arr Int -> Int -> Int -> Prog ()
+writeMatMulScalarCell n left right out i j = do
+  total <- accumFor n 0 $ \acc k -> do
+    lhs <- readArr left (i * n + k)
+    rhs <- readArr right (k * n + j)
+    pure (acc + lhs * rhs)
+  writeArr out (i * n + j) total
 
 runWavefrontEditDistanceKernel :: Int -> Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
 runWavefrontEditDistanceKernel rows cols left right dp =

@@ -7,7 +7,8 @@ import Control.Monad (unless)
 import GHC.Conc (getNumCapabilities)
 import Loom
 import Loom.Benchmark.Kernels
-  ( runRedBlackStencilExample
+  ( runMatMulExample
+  , runRedBlackStencilExample
   , runSeparableBlurExample
   , runThreePhaseNormalizeExample
   , runWavefrontEditDistanceExample
@@ -21,6 +22,8 @@ main = do
   testShapeLoop1D
   testReducerSum
   testAccumFor
+  testVecPrimitives
+  testStripMine
   testParallelReducerScope
   testDynamicChunkedReducerScope
   testAccumulatorPhases
@@ -47,6 +50,7 @@ main = do
   testWavefrontEdgeCases
   testWavefrontPascal
   testWavefrontEditDistanceBenchmark
+  testMatMulBenchmarkVectorized
   putStrLn "All loom-hs tests passed."
 
 testArrayUpdate :: IO ()
@@ -103,6 +107,38 @@ testAccumFor = do
       x <- readArr arr i
       pure (acc + x * 2)
   assertEqual "accumFor" 30 total
+
+testVecPrimitives :: IO ()
+testVecPrimitives = do
+  src <- fromList [1 .. 8 :: Int]
+  out <- newArr 8
+  runProg $ do
+    left <- readVec src 0
+    right <- readVec src 4
+    writeVec out 0 (addVec (mulVec left (broadcastVec 2)) (broadcastVec 1))
+    writeVec out 4 (addVec right (broadcastVec 10))
+  xs <- toList out
+  assertEqual "vec primitives" [3, 5, 7, 9, 15, 16, 17, 18] xs
+  total <- runProg $ do
+    vec <- readVec src 0
+    pure (sumVec vec)
+  assertEqual "vec reduction" 10 total
+
+testStripMine :: IO ()
+testStripMine = do
+  src <- fromList [0 .. 9 :: Int]
+  out <- newArr 10
+  runProg $
+    stripMine vecWidth 10
+      (\base -> do
+         vec <- readVec src base
+         writeVec out base vec
+      )
+      (\i -> do
+         x <- readArr src i
+         writeArr out i x)
+  xs <- toList out
+  assertEqual "stripMine" [0 .. 9] xs
 
 testParallelReducerScope :: IO ()
 testParallelReducerScope = do
@@ -422,6 +458,19 @@ testWavefrontEditDistanceBenchmark :: IO ()
 testWavefrontEditDistanceBenchmark = do
   distance <- runWavefrontEditDistanceExample [1, 2, 3, 4] [1, 3, 4]
   assertEqual "wavefront edit distance benchmark" 1 distance
+
+testMatMulBenchmarkVectorized :: IO ()
+testMatMulBenchmarkVectorized = do
+  xs <-
+    runMatMulExample
+      4
+      [1 .. 16]
+      [ 1, 0, 0, 0
+      , 0, 1, 0, 0
+      , 0, 0, 1, 0
+      , 0, 0, 0, 1
+      ]
+  assertEqual "matmul benchmark vectorized" [1 .. 16] xs
 
 runAffineFill :: Affine2 -> IO [Int]
 runAffineFill transform = do

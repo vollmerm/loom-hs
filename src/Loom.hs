@@ -7,6 +7,7 @@ module Loom
   , Rect2
   , Affine2
   , Transform2D
+  , Vec
   , Prog
   , Reducer
   , RedVar
@@ -39,6 +40,7 @@ module Loom
   , composeTransform2D
   , interchangeTransform2D
   , skewTransform2D
+  , vecWidth
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -59,8 +61,15 @@ module Loom
   , tile2D
   , parForTile2D
   , tiledFor2D
+  , stripMine
+  , broadcastVec
   , readArr
   , writeArr
+  , readVec
+  , writeVec
+  , addVec
+  , mulVec
+  , sumVec
   , newReducer
   , reduce
   , getReducer

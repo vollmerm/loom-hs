@@ -12,6 +12,7 @@ module Loom.Internal.Kernel
   , Rect2
   , Affine2
   , Transform2D
+  , Vec
   , Prog
   , Reducer
   , RedVar
@@ -44,6 +45,7 @@ module Loom.Internal.Kernel
   , composeTransform2D
   , interchangeTransform2D
   , skewTransform2D
+  , vecWidth
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -64,8 +66,15 @@ module Loom.Internal.Kernel
   , tile2D
   , parForTile2D
   , tiledFor2D
+  , stripMine
+  , broadcastVec
   , readArr
   , writeArr
+  , readVec
+  , writeVec
+  , addVec
+  , mulVec
+  , sumVec
   , newReducer
   , reduce
   , getReducer
@@ -157,6 +166,8 @@ newtype Transform2D = Transform2D
       repr ()
   }
 
+data Vec a = Vec !a !a !a !a
+
 data ReducerSpec rep a = ReducerSpec
   { reducerInit :: !rep
   , reducerStep :: rep -> a -> rep
@@ -212,6 +223,8 @@ class Monad repr => Loop repr where
   loopParFor2# :: Int# -> Int# -> (Int# -> Int# -> repr ()) -> repr ()
   loopReadArr :: Prim a => Arr a -> Int -> repr a
   loopWriteArr :: Prim a => Arr a -> Int -> a -> repr ()
+  loopReadVec :: Prim a => Arr a -> Int -> repr (Vec a)
+  loopWriteVec :: Prim a => Arr a -> Int -> Vec a -> repr ()
   loopNewReducer :: Reducer a -> (RedVar a -> repr r) -> repr r
   loopReduce :: RedVar a -> a -> repr ()
   loopGetReducer :: RedVar a -> repr a
@@ -280,42 +293,12 @@ instance Loop Kernel where
       _ ->
         pure ()
 
-  loopParFor n body = Kernel $ \rt -> do
-    let childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
-        canRunParallel !workers =
-          rtLoopDepth rt == 0
-            && rtWorkerId rt == Nothing
-            && workers > 1
-    case rtTeam rt of
-      Just team ->
-        if canRunParallel (teamWorkerCount team)
-          then runParallel team childRt
-          else runSequential childRt 0
-      Nothing -> do
-        caps <- getNumCapabilities
-        let !workers = min n (max 1 caps)
-        if canRunParallel workers
-          then
-            withParallelTeam workers $ \team ->
-              runParallel team ((childRt {rtTeam = Just team}))
-          else runSequential childRt 0
-    where
-      runSequential !childRt = goSeq
-        where
-          goSeq !i
-            | i >= n = pure ()
-            | otherwise = runKernel (body i) childRt >> goSeq (i + 1)
-
-      runParallel !team !childRt =
-        runParallelPhase team n (chunkSizeFor (teamWorkerCount team) n) $ \workerId start end ->
-          let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
-           in runChunk workerRt start end
-
-      runChunk !workerRt !start !end = goChunk start
-        where
-          goChunk !i
+  loopParFor n body = Kernel $ \rt ->
+    dispatchLoop rt n $ \workerRt start end ->
+      let go !i
             | i >= end = pure ()
-            | otherwise = runKernel (body i) workerRt >> goChunk (i + 1)
+            | otherwise = runKernel (body i) workerRt >> go (i + 1)
+       in go start
 
   loopParFor2# n# m# body = Kernel $ \rt ->
     case n# <=# 0# of
@@ -323,59 +306,27 @@ instance Loop Kernel where
       _ ->
         case m# <=# 0# of
           1# -> pure ()
-          _ -> do
-            let !total# = n# *# m#
-                !total = I# total#
-                childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
-                canRunParallel !workers =
-                  rtLoopDepth rt == 0
-                    && rtWorkerId rt == Nothing
-                    && workers > 1
-            case rtTeam rt of
-              Just team ->
-                if canRunParallel (teamWorkerCount team)
-                  then runParallel2 total team childRt
-                  else runSequential2 childRt 0 total
-              Nothing -> do
-                caps <- getNumCapabilities
-                let !workers = min total (max 1 caps)
-                if canRunParallel workers
-                  then
-                    withParallelTeam workers $ \team ->
-                      runParallel2 total team (childRt {rtTeam = Just team})
-                  else runSequential2 childRt 0 total
-    where
-      runSequential2 !childRt !start !end =
-        case start of
-          I# start# ->
-            case end of
-              I# end# ->
-                case start# >=# end# of
-                  1# -> pure ()
-                  _ ->
-                    let !i0# = quotInt# start# m#
-                        !j0# = start# -# (i0# *# m#)
-                     in go2 childRt start# end# i0# j0#
-
-      go2 !childRt !idx# !end# !i# !j# =
-        case idx# >=# end# of
-          1# -> pure ()
-          _ -> do
-            runKernel (body i# j#) childRt
-            let !j'# = j# +# 1#
-                !idx'# = idx# +# 1#
-            case j'# <# m# of
-              1# -> go2 childRt idx'# end# i# j'#
-              _ -> go2 childRt idx'# end# (i# +# 1#) 0#
-
-      runParallel2 !total !team !childRt =
-        runParallelPhase team total (chunkSizeFor (teamWorkerCount team) total) $ \workerId start end ->
-          let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
-           in runSequential2 workerRt start end
+          _ ->
+            let !total = I# (n# *# m#)
+             in dispatchLoop rt total $ \workerRt start end ->
+                  runLinear2D workerRt m# body start end
 
   loopReadArr (Arr _ arr) i = Kernel (\_ -> readPrimArray arr i)
 
   loopWriteArr (Arr _ arr) i x = Kernel (\_ -> writePrimArray arr i x)
+
+  loopReadVec (Arr _ arr) i = Kernel $ \_ -> do
+    !x0 <- readPrimArray arr i
+    !x1 <- readPrimArray arr (i + 1)
+    !x2 <- readPrimArray arr (i + 2)
+    !x3 <- readPrimArray arr (i + 3)
+    pure (Vec x0 x1 x2 x3)
+
+  loopWriteVec (Arr _ arr) i (Vec x0 x1 x2 x3) = Kernel $ \_ -> do
+    writePrimArray arr i x0
+    writePrimArray arr (i + 1) x1
+    writePrimArray arr (i + 2) x2
+    writePrimArray arr (i + 3) x3
 
   loopNewReducer reducer body =
     Kernel $ \rt -> do
@@ -644,7 +595,29 @@ boundingBoxAffine2D affine rect@(Rect2 rowLo colLo rowHi colHi)
           !rowMax = max p00Row (max p01Row (max p10Row p11Row))
           !colMin = min p00Col (min p01Col (min p10Col p11Col))
           !colMax = max p00Col (max p01Col (max p10Col p11Col))
-       in Rect2 rowMin colMin (rowMax + 1) (colMax + 1)
+        in Rect2 rowMin colMin (rowMax + 1) (colMax + 1)
+
+{-# INLINE vecWidth #-}
+vecWidth :: Int
+vecWidth = 4
+
+{-# INLINE broadcastVec #-}
+broadcastVec :: a -> Vec a
+broadcastVec x = Vec x x x x
+
+{-# INLINE addVec #-}
+addVec :: Num a => Vec a -> Vec a -> Vec a
+addVec (Vec a0 a1 a2 a3) (Vec b0 b1 b2 b3) =
+  Vec (a0 + b0) (a1 + b1) (a2 + b2) (a3 + b3)
+
+{-# INLINE mulVec #-}
+mulVec :: Num a => Vec a -> Vec a -> Vec a
+mulVec (Vec a0 a1 a2 a3) (Vec b0 b1 b2 b3) =
+  Vec (a0 * b0) (a1 * b1) (a2 * b2) (a3 * b3)
+
+{-# INLINE sumVec #-}
+sumVec :: Num a => Vec a -> a
+sumVec (Vec x0 x1 x2 x3) = ((x0 + x1) + x2) + x3
 
 {-# INLINE parallel #-}
 parallel :: Prog a -> Prog a
@@ -820,6 +793,21 @@ tiledFor2D tileRows tileCols shape body =
   tile2D tileRows tileCols shape $ \row0 col0 ->
     parForTile2D tileRows tileCols row0 col0 shape body
 
+{-# INLINE stripMine #-}
+stripMine :: Int -> Int -> (Int -> Prog ()) -> (Int -> Prog ()) -> Prog ()
+stripMine width n fullBody tailBody
+  | width <= 0 = invalidProgUsage "stripMine requires a positive chunk width"
+  | n <= 0 = pure ()
+  | otherwise = do
+      parFor fullIters $ \chunk ->
+        fullBody (chunk * width)
+      parFor tailCount $ \offset ->
+        tailBody (tailStart + offset)
+  where
+    !fullIters = n `quot` width
+    !tailStart = fullIters * width
+    !tailCount = n - tailStart
+
 {-# INLINE readArr #-}
 readArr :: Prim a => Arr a -> Int -> Prog a
 readArr arr i = Prog $ \k -> loopReadArr arr i >>= k
@@ -828,6 +816,16 @@ readArr arr i = Prog $ \k -> loopReadArr arr i >>= k
 writeArr :: Prim a => Arr a -> Int -> a -> Prog ()
 writeArr arr i x = Prog $ \k -> do
   loopWriteArr arr i x
+  k ()
+
+{-# INLINE readVec #-}
+readVec :: Prim a => Arr a -> Int -> Prog (Vec a)
+readVec arr i = Prog $ \k -> loopReadVec arr i >>= k
+
+{-# INLINE writeVec #-}
+writeVec :: Prim a => Arr a -> Int -> Vec a -> Prog ()
+writeVec arr i vec = Prog $ \k -> do
+  loopWriteVec arr i vec
   k ()
 
 {-# INLINE newReducer #-}
@@ -930,6 +928,67 @@ tileSpan# len# start# tile# =
    in case remaining# <# tile# of
         1# -> remaining#
         _ -> tile#
+
+{-# INLINE canRunParallelLoop #-}
+canRunParallelLoop :: Runtime -> Int -> Bool
+canRunParallelLoop rt workers =
+  rtLoopDepth rt == 0
+    && rtWorkerId rt == Nothing
+    && workers > 1
+
+dispatchLoop :: Runtime -> Int -> (Runtime -> Int -> Int -> IO ()) -> IO ()
+dispatchLoop rt total runChunk
+  | total <= 0 = pure ()
+  | otherwise =
+      let !childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
+       in case rtTeam rt of
+            Just team ->
+              if canRunParallelLoop rt (teamWorkerCount team)
+                then runInParallel team childRt
+                else runChunk childRt 0 total
+            Nothing -> do
+              caps <- getNumCapabilities
+              let !workers = min total (max 1 caps)
+              if canRunParallelLoop rt workers
+                then
+                  withParallelTeam workers $ \team ->
+                    runInParallel team (childRt {rtTeam = Just team})
+                else runChunk childRt 0 total
+  where
+    runInParallel !team !childRt =
+      runParallelPhase team total (chunkSizeFor (teamWorkerCount team) total) $ \workerId start end ->
+        let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
+         in runChunk workerRt start end
+
+runLinear2D ::
+  Runtime ->
+  Int# ->
+  (Int# -> Int# -> Kernel ()) ->
+  Int ->
+  Int ->
+  IO ()
+runLinear2D !workerRt m# body start end =
+  case start of
+    I# start# ->
+      case end of
+        I# end# ->
+          case start# >=# end# of
+            1# -> pure ()
+            _ ->
+              let !i0# = quotInt# start# m#
+                  !j0# = start# -# (i0# *# m#)
+               in go start# end# i0# j0#
+  where
+    go !idx# !end# !i# !j# =
+      case idx# >=# end# of
+        1# -> pure ()
+        _ -> do
+          runKernel (body i# j#) workerRt
+          let !j'# = j# +# 1#
+              !idx'# = idx# +# 1#
+          case j'# <# m# of
+            1# -> go idx'# end# i# j'#
+            _ -> go idx'# end# (i# +# 1#) 0#
 
 shouldShareReducer :: Runtime -> Bool
 shouldShareReducer rt =
