@@ -4,6 +4,8 @@ module Loom
   , Ix2
   , Sh1
   , Sh2
+  , Rect2
+  , Affine2
   , Prog
   , Reducer
   , RedVar
@@ -12,14 +14,24 @@ module Loom
   , ix2
   , sh1
   , sh2
+  , rect2
+  , affine2
   , newArr
   , fromList
   , toList
   , unIx1
   , unIx2
+  , unRect2
   , withIx2
   , index1
   , index2
+  , applyAffine2
+  , composeAffine2
+  , invertAffine2
+  , identityAffine2
+  , interchange2D
+  , skew2D
+  , boundingBoxAffine2D
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -30,6 +42,9 @@ module Loom
   , parForSh1
   , parForSh2
   , parFor2
+  , parForRect2D
+  , parForAffineRect2D
+  , parForAffine2D
   , tile2D
   , parForTile2D
   , tiledFor2D

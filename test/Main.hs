@@ -10,6 +10,7 @@ main :: IO ()
 main = do
   testArrayUpdate
   testIndexHelpers
+  testAffine2Basics
   testShapeLoop1D
   testReducerSum
   testAccumFor
@@ -17,6 +18,11 @@ main = do
   testAccumulatorPhases
   testBarrierRejectedInLoop
   testMatrixMultiply
+  testAffineLoopIdentity
+  testAffineLoopInterchange
+  testAffineLoopSkew
+  testAffineLoopComposition
+  testAffineLoopRejectsSingularTransform
   testTiledFor2D
   testTiledMatrixMultiply
   putStrLn "All loom-hs tests passed."
@@ -37,6 +43,17 @@ testIndexHelpers = do
   assertEqual "unIx2" (2, 1) (unIx2 (ix2 2 1))
   assertEqual "index1" 4 (index1 (sh1 8) (ix1 4))
   assertEqual "index2" 9 (index2 (sh2 3 4) (ix2 2 1))
+
+testAffine2Basics :: IO ()
+testAffine2Basics = do
+  let skew = skew2D 1
+      shift = affine2 1 0 0 1 2 (-1)
+      composed = composeAffine2 shift skew
+      box = boundingBoxAffine2D skew (rect2 0 0 3 4)
+  assertEqual "apply affine2" (2, 5) (unIx2 (applyAffine2 skew (ix2 2 3)))
+  assertEqual "compose affine2" (4, 4) (unIx2 (applyAffine2 composed (ix2 2 3)))
+  assertEqual "invert affine2" (Just (2, 3)) (fmap (unIx2 . (`applyAffine2` ix2 4 4)) (invertAffine2 composed))
+  assertEqual "bounding box affine2d" (0, 0, 3, 6) (unRect2 box)
 
 testShapeLoop1D :: IO ()
 testShapeLoop1D = do
@@ -130,6 +147,41 @@ testMatrixMultiply = do
   xs <- toList c
   assertEqual "matrix multiply" [58, 64, 139, 154] xs
 
+testAffineLoopIdentity :: IO ()
+testAffineLoopIdentity = do
+  xs <- runAffineFill identityAffine2
+  assertEqual "affine loop identity" expectedAffineFill xs
+
+testAffineLoopInterchange :: IO ()
+testAffineLoopInterchange = do
+  xs <- runAffineFill interchange2D
+  assertEqual "affine loop interchange" expectedAffineFill xs
+
+testAffineLoopSkew :: IO ()
+testAffineLoopSkew = do
+  xs <- runAffineFill (skew2D 1)
+  assertEqual "affine loop skew" expectedAffineFill xs
+
+testAffineLoopComposition :: IO ()
+testAffineLoopComposition = do
+  let transform = composeAffine2 interchange2D (skew2D 1)
+  xs <- runAffineFill transform
+  assertEqual "affine loop composition" expectedAffineFill xs
+
+testAffineLoopRejectsSingularTransform :: IO ()
+testAffineLoopRejectsSingularTransform = do
+  result <-
+    ( try $
+        runProg $
+          parallel $
+            parForAffine2D (affine2 1 0 0 0 0 0) (sh2 2 2) $ \_ ->
+              pure ()
+    ) ::
+      IO (Either SomeException ())
+  case result of
+    Left _ -> pure ()
+    Right _ -> error "singular affine transform should fail"
+
 testTiledFor2D :: IO ()
 testTiledFor2D = do
   let rows = 3
@@ -163,6 +215,22 @@ testTiledMatrixMultiply = do
           writeArr c (i * colsB + j) total
   xs <- toList c
   assertEqual "tiled matrix multiply" [58, 64, 139, 154] xs
+
+runAffineFill :: Affine2 -> IO [Int]
+runAffineFill transform = do
+  let rows = 3
+      cols = 5
+      shape = sh2 rows cols
+  arr <- newArr (rows * cols)
+  runProg $
+    parallel $
+      parForAffine2D transform shape $ \ix ->
+        withIx2 ix $ \i j ->
+          writeArr arr (index2 shape ix) (i * 10 + j)
+  toList arr
+
+expectedAffineFill :: [Int]
+expectedAffineFill = [i * 10 + j | i <- [0 .. 2], j <- [0 .. 4]]
 
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual label expected actual =

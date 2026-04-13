@@ -9,6 +9,8 @@ module Loom.Internal.Kernel
   , Ix2
   , Sh1
   , Sh2
+  , Rect2
+  , Affine2
   , Prog
   , Reducer
   , RedVar
@@ -17,14 +19,24 @@ module Loom.Internal.Kernel
   , ix2
   , sh1
   , sh2
+  , rect2
+  , affine2
   , newArr
   , fromList
   , toList
   , unIx1
   , unIx2
+  , unRect2
   , withIx2
   , index1
   , index2
+  , applyAffine2
+  , composeAffine2
+  , invertAffine2
+  , identityAffine2
+  , interchange2D
+  , skew2D
+  , boundingBoxAffine2D
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -35,6 +47,9 @@ module Loom.Internal.Kernel
   , parForSh1
   , parForSh2
   , parFor2
+  , parForRect2D
+  , parForAffineRect2D
+  , parForAffine2D
   , tile2D
   , parForTile2D
   , tiledFor2D
@@ -99,6 +114,22 @@ data Ix2 = Ix2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 newtype Sh1 = Sh1 Int
 
 data Sh2 = Sh2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+
+data Rect2 =
+  Rect2
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
+
+data Affine2 =
+  Affine2
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
+    {-# UNPACK #-} !Int
 
 data ReducerSpec rep a = ReducerSpec
   { reducerInit :: !rep
@@ -419,6 +450,14 @@ sh1 = Sh1
 sh2 :: Int -> Int -> Sh2
 sh2 = Sh2
 
+{-# INLINE rect2 #-}
+rect2 :: Int -> Int -> Int -> Int -> Rect2
+rect2 = Rect2
+
+{-# INLINE affine2 #-}
+affine2 :: Int -> Int -> Int -> Int -> Int -> Int -> Affine2
+affine2 = Affine2
+
 {-# INLINE unIx1 #-}
 unIx1 :: Ix1 -> Int
 unIx1 (Ix1 i) = i
@@ -426,6 +465,10 @@ unIx1 (Ix1 i) = i
 {-# INLINE unIx2 #-}
 unIx2 :: Ix2 -> (Int, Int)
 unIx2 (Ix2 i j) = (i, j)
+
+{-# INLINE unRect2 #-}
+unRect2 :: Rect2 -> (Int, Int, Int, Int)
+unRect2 (Rect2 rowLo colLo rowHi colHi) = (rowLo, colLo, rowHi, colHi)
 
 {-# INLINE withIx2 #-}
 withIx2 :: Ix2 -> (Int -> Int -> r) -> r
@@ -438,6 +481,79 @@ index1 (Sh1 _) (Ix1 i) = i
 {-# INLINE index2 #-}
 index2 :: Sh2 -> Ix2 -> Int
 index2 (Sh2 _ n) (Ix2 i j) = i * n + j
+
+{-# INLINE applyAffine2 #-}
+applyAffine2 :: Affine2 -> Ix2 -> Ix2
+applyAffine2 (Affine2 a00 a01 a10 a11 b0 b1) (Ix2 i j) =
+  Ix2
+    (a00 * i + a01 * j + b0)
+    (a10 * i + a11 * j + b1)
+
+{-# INLINE composeAffine2 #-}
+composeAffine2 :: Affine2 -> Affine2 -> Affine2
+composeAffine2
+  (Affine2 a00 a01 a10 a11 b0 b1)
+  (Affine2 c00 c01 c10 c11 d0 d1) =
+    Affine2
+      (a00 * c00 + a01 * c10)
+      (a00 * c01 + a01 * c11)
+      (a10 * c00 + a11 * c10)
+      (a10 * c01 + a11 * c11)
+      (a00 * d0 + a01 * d1 + b0)
+      (a10 * d0 + a11 * d1 + b1)
+
+{-# INLINE invertAffine2 #-}
+invertAffine2 :: Affine2 -> Maybe Affine2
+invertAffine2 (Affine2 a00 a01 a10 a11 b0 b1) =
+  let !det = a00 * a11 - a01 * a10
+   in case det of
+        1 ->
+          let !c00 = a11
+              !c01 = negate a01
+              !c10 = negate a10
+              !c11 = a00
+              !d0 = negate (c00 * b0 + c01 * b1)
+              !d1 = negate (c10 * b0 + c11 * b1)
+           in Just (Affine2 c00 c01 c10 c11 d0 d1)
+        (-1) ->
+          let !c00 = negate a11
+              !c01 = a01
+              !c10 = a10
+              !c11 = negate a00
+              !d0 = negate (c00 * b0 + c01 * b1)
+              !d1 = negate (c10 * b0 + c11 * b1)
+           in Just (Affine2 c00 c01 c10 c11 d0 d1)
+        _ ->
+          Nothing
+
+{-# INLINE identityAffine2 #-}
+identityAffine2 :: Affine2
+identityAffine2 = Affine2 1 0 0 1 0 0
+
+{-# INLINE interchange2D #-}
+interchange2D :: Affine2
+interchange2D = Affine2 0 1 1 0 0 0
+
+{-# INLINE skew2D #-}
+skew2D :: Int -> Affine2
+skew2D factor = Affine2 1 0 factor 1 0 0
+
+{-# INLINE boundingBoxAffine2D #-}
+boundingBoxAffine2D :: Affine2 -> Rect2 -> Rect2
+boundingBoxAffine2D affine rect@(Rect2 rowLo colLo rowHi colHi)
+  | isEmptyRect2 rect = Rect2 rowLo colLo rowLo colLo
+  | otherwise =
+      let !rowLast = rowHi - 1
+          !colLast = colHi - 1
+          Ix2 p00Row p00Col = applyAffine2 affine (Ix2 rowLo colLo)
+          Ix2 p01Row p01Col = applyAffine2 affine (Ix2 rowLo colLast)
+          Ix2 p10Row p10Col = applyAffine2 affine (Ix2 rowLast colLo)
+          Ix2 p11Row p11Col = applyAffine2 affine (Ix2 rowLast colLast)
+          !rowMin = min p00Row (min p01Row (min p10Row p11Row))
+          !rowMax = max p00Row (max p01Row (max p10Row p11Row))
+          !colMin = min p00Col (min p01Col (min p10Col p11Col))
+          !colMax = max p00Col (max p01Col (max p10Col p11Col))
+       in Rect2 rowMin colMin (rowMax + 1) (colMax + 1)
 
 {-# INLINE parallel #-}
 parallel :: Prog a -> Prog a
@@ -473,6 +589,46 @@ parForSh2 (Sh2 n m) body =
 {-# INLINE parFor2 #-}
 parFor2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
 parFor2 = loopParForSh2
+
+{-# INLINE parForRect2D #-}
+parForRect2D :: Rect2 -> (Ix2 -> Prog ()) -> Prog ()
+parForRect2D (Rect2 rowLo colLo rowHi colHi) body =
+  case rowLo of
+    I# rowLo# ->
+      case colLo of
+        I# colLo# ->
+          case rowHi - rowLo of
+            I# rowCount# ->
+              case colHi - colLo of
+                I# colCount# ->
+                  Prog $ \k -> do
+                    loopParFor2#
+                      rowCount#
+                      colCount#
+                      (\i# j# ->
+                         unProg
+                           (body (Ix2 (I# (rowLo# +# i#)) (I# (colLo# +# j#))))
+                           (\() -> pure ()))
+                    k ()
+
+{-# INLINE parForAffineRect2D #-}
+parForAffineRect2D :: Affine2 -> Rect2 -> (Ix2 -> Prog ()) -> Prog ()
+parForAffineRect2D affine rect body =
+  case invertAffine2 affine of
+    Nothing ->
+      invalidProgUsage "parForAffineRect2D requires an invertible integer transform"
+    Just inverse ->
+      let !box = boundingBoxAffine2D affine rect
+       in parForRect2D box $ \ix' ->
+            let !ix = applyAffine2 inverse ix'
+             in case inRect2 rect ix of
+                  True -> body ix
+                  False -> pure ()
+
+{-# INLINE parForAffine2D #-}
+parForAffine2D :: Affine2 -> Sh2 -> (Ix2 -> Prog ()) -> Prog ()
+parForAffine2D affine shape =
+  parForAffineRect2D affine (rectOfShape2 shape)
 
 {-# INLINE tile2D #-}
 tile2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
@@ -740,3 +896,17 @@ chunkRanges !workers !n = go 0
       | otherwise =
           let !end = min n (start + chunkSize)
            in (start, end) : go end
+
+{-# INLINE rectOfShape2 #-}
+rectOfShape2 :: Sh2 -> Rect2
+rectOfShape2 (Sh2 rows cols) = Rect2 0 0 rows cols
+
+{-# INLINE isEmptyRect2 #-}
+isEmptyRect2 :: Rect2 -> Bool
+isEmptyRect2 (Rect2 rowLo colLo rowHi colHi) =
+  rowHi <= rowLo || colHi <= colLo
+
+{-# INLINE inRect2 #-}
+inRect2 :: Rect2 -> Ix2 -> Bool
+inRect2 (Rect2 rowLo colLo rowHi colHi) (Ix2 row col) =
+  row >= rowLo && row < rowHi && col >= colLo && col < colHi
