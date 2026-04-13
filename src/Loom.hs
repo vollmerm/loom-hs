@@ -3,6 +3,7 @@ module Loom
   , Prog
   , Reducer
   , RedVar
+  , AccVar
   , newArr
   , fromList
   , toList
@@ -10,14 +11,22 @@ module Loom
   , readArrIO
   , writeArrIO
   , runProg
+  , parallel
+  , barrier
   , parFor
+  , parFor2
   , readArr
   , writeArr
   , newReducer
   , reduce
   , getReducer
+  , accumFor
+  , newAcc
+  , readAcc
+  , writeAcc
   , foldFor
   , mkReducer
+  , mkReducerWith
   , intSum
   , doubleSum
   ) where

@@ -7,6 +7,7 @@ module Loom.Internal.Kernel
   , Prog
   , Reducer
   , RedVar
+  , AccVar
   , newArr
   , fromList
   , toList
@@ -14,22 +15,36 @@ module Loom.Internal.Kernel
   , readArrIO
   , writeArrIO
   , runProg
+  , parallel
+  , barrier
   , parFor
+  , parFor2
   , readArr
   , writeArr
   , newReducer
   , reduce
   , getReducer
+  , accumFor
+  , newAcc
+  , readAcc
+  , writeAcc
   , foldFor
   , mkReducer
+  , mkReducerWith
   , intSum
   , doubleSum
   ) where
 
-import Control.Concurrent (forkIOWithUnmask, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, try, throwIO)
+import Control.Concurrent (MVar, forkIOWithUnmask, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (ap)
 import Control.Monad.ST (RealWorld)
+import Data.Primitive.Array
+  ( MutableArray
+  , newArray
+  , readArray
+  , writeArray
+  )
 import Data.Primitive.PrimArray
   ( MutablePrimArray
   , newPrimArray
@@ -50,6 +65,7 @@ data Arr a = Arr !Int !(MutablePrimArray RealWorld a)
 data ReducerSpec rep a = ReducerSpec
   { reducerInit :: !rep
   , reducerStep :: rep -> a -> rep
+  , reducerMerge :: rep -> rep -> rep
   , reducerDone :: rep -> a
   }
 
@@ -57,15 +73,35 @@ data Reducer a where
   Reducer :: Prim rep => !(ReducerSpec rep a) -> Reducer a
 
 data RedVar a where
-  RedVar :: Prim rep => !(PrimVar RealWorld rep) -> !(ReducerSpec rep a) -> RedVar a
+  LocalRedVar ::
+    Prim rep =>
+    !(PrimVar RealWorld rep) ->
+    !(ReducerSpec rep a) ->
+    RedVar a
+  SharedRedVar ::
+    Prim rep =>
+    !(MutableArray RealWorld (PrimVar RealWorld rep)) ->
+    !Int ->
+    !(ReducerSpec rep a) ->
+    RedVar a
+
+data AccVar a where
+  AccVar :: Prim a => !(PrimVar RealWorld a) -> AccVar a
 
 class Monad repr => Loop repr where
+  loopParallel :: repr a -> repr a
+  loopBarrier :: repr ()
   loopParFor :: Int -> (Int -> repr ()) -> repr ()
+  loopParFor2 :: Int -> Int -> (Int -> Int -> repr ()) -> repr ()
   loopReadArr :: Prim a => Arr a -> Int -> repr a
   loopWriteArr :: Prim a => Arr a -> Int -> a -> repr ()
   loopNewReducer :: Reducer a -> (RedVar a -> repr r) -> repr r
   loopReduce :: RedVar a -> a -> repr ()
   loopGetReducer :: RedVar a -> repr a
+  loopAccumFor :: Int -> a -> (a -> Int -> repr a) -> repr a
+  loopNewAcc :: Prim a => a -> (AccVar a -> repr r) -> repr r
+  loopReadAcc :: Prim a => AccVar a -> repr a
+  loopWriteAcc :: Prim a => AccVar a -> a -> repr ()
   loopFoldFor :: Reducer a -> Int -> (Int -> repr a) -> repr a
 
 newtype Prog a = Prog
@@ -82,90 +118,202 @@ instance Applicative Prog where
 instance Monad Prog where
   Prog m >>= f = Prog $ \k -> m (\a -> unProg (f a) k)
 
+data Runtime = Runtime
+  { rtParallelWorkers :: !(Maybe Int)
+  , rtWorkerId :: !(Maybe Int)
+  , rtLoopDepth :: !Int
+  }
+
 newtype Kernel a = Kernel
-  { runKernel :: Int -> IO a
+  { runKernel :: Runtime -> IO a
   }
 
 instance Functor Kernel where
-  fmap f (Kernel action) = Kernel (\depth -> fmap f (action depth))
+  fmap f (Kernel action) = Kernel (\rt -> fmap f (action rt))
 
 instance Applicative Kernel where
   pure x = Kernel (\_ -> pure x)
-  Kernel mf <*> Kernel mx = Kernel (\depth -> mf depth <*> mx depth)
+  Kernel mf <*> Kernel mx = Kernel (\rt -> mf rt <*> mx rt)
 
 instance Monad Kernel where
-  Kernel action >>= f = Kernel $ \depth -> do
-    x <- action depth
-    runKernel (f x) depth
+  Kernel action >>= f = Kernel $ \rt -> do
+    x <- action rt
+    runKernel (f x) rt
 
 instance Loop Kernel where
-  loopParFor n body = Kernel go
-    where
-      go !depth = do
+  loopParallel body = Kernel $ \rt ->
+    case (rtParallelWorkers rt, rtWorkerId rt, rtLoopDepth rt) of
+      (Nothing, Nothing, 0) -> do
         caps <- getNumCapabilities
-        let workers = min caps n
-            childDepth = depth + 1
-        if depth == 0 && workers > 1
-          then runParallel childDepth workers
-          else runSequential childDepth 0
+        let !workers = max 1 caps
+        runKernel body (Runtime (Just workers) Nothing 0)
+      _ ->
+        invalidUsage "parallel regions cannot be nested or entered from inside a loop body"
 
-      runSequential !childDepth = goSeq
+  loopBarrier = Kernel $ \rt ->
+    case (rtParallelWorkers rt, rtWorkerId rt, rtLoopDepth rt) of
+      (Nothing, _, _) ->
+        invalidUsage "barrier may only be used inside a parallel region"
+      (_, Just _, _) ->
+        invalidUsage "barrier may not appear inside a parallel loop body"
+      (_, _, depth)
+        | depth > 0 ->
+            invalidUsage "barrier may only appear between parallel phases"
+      _ ->
+        pure ()
+
+  loopParFor n body = Kernel $ \rt -> do
+    workers0 <-
+      case rtParallelWorkers rt of
+        Just workers -> pure workers
+        Nothing -> getNumCapabilities
+    let !workers = min n (max 1 workers0)
+        childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
+        canRunParallel =
+          rtLoopDepth rt == 0
+            && rtWorkerId rt == Nothing
+            && workers > 1
+    if canRunParallel
+      then runParallel workers childRt
+      else runSequential childRt 0
+    where
+      runSequential !childRt = goSeq
         where
           goSeq !i
             | i >= n = pure ()
-            | otherwise = runKernel (body i) childDepth >> goSeq (i + 1)
+            | otherwise = runKernel (body i) childRt >> goSeq (i + 1)
 
-      runParallel !childDepth !workers = do
+      runParallel !workers !childRt = do
         let chunks = chunkRanges workers n
-        vars <- mapM (forkChunk childDepth) chunks
-        mapM_ awaitChunk vars
+        vars <- mapM (forkChunk childRt) (zip [0 ..] chunks)
+        mapM_ awaitChunkResult vars
 
-      forkChunk !childDepth (!start, !end) = do
+      forkChunk !childRt (!workerId, (!start, !end)) = do
         var <- newEmptyMVar
         _ <-
           forkIOWithUnmask $ \unmask -> do
-            result <- try (unmask (runChunk childDepth start end)) :: IO (Either SomeException ())
+            let workerRt = childRt {rtWorkerId = Just workerId}
+            result <- try (unmask (runChunk workerRt start end)) :: IO (Either SomeException ())
             putMVar var result
         pure var
 
-      runChunk !childDepth !start !end = goChunk start
+      runChunk !workerRt !start !end = goChunk start
         where
           goChunk !i
             | i >= end = pure ()
-            | otherwise = runKernel (body i) childDepth >> goChunk (i + 1)
+            | otherwise = runKernel (body i) workerRt >> goChunk (i + 1)
 
-      awaitChunk var = do
-        result <- takeMVar var
-        either throwIO pure result
+  loopParFor2 n m body = Kernel $ \rt ->
+    if n <= 0 || m <= 0
+      then pure ()
+      else do
+        let !total = n * m
+        workers0 <-
+          case rtParallelWorkers rt of
+            Just workers -> pure workers
+            Nothing -> getNumCapabilities
+        let !workers = min total (max 1 workers0)
+            childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
+            canRunParallel =
+              rtLoopDepth rt == 0
+                && rtWorkerId rt == Nothing
+                && workers > 1
+        if canRunParallel
+          then runParallel2 total workers childRt
+          else runSequential2 childRt 0 total
+    where
+      runSequential2 !childRt !start !end
+        | start >= end = pure ()
+        | otherwise =
+            let !i0 = start `quot` m
+                !j0 = start - i0 * m
+             in go2 childRt start end i0 j0
+
+      go2 !childRt !idx !end !i !j
+        | idx >= end = pure ()
+        | otherwise = do
+            runKernel (body i j) childRt
+            let !j' = j + 1
+            if j' < m
+              then go2 childRt (idx + 1) end i j'
+              else go2 childRt (idx + 1) end (i + 1) 0
+
+      runParallel2 !total !workers !childRt = do
+        let chunks = chunkRanges workers total
+        vars <- mapM (forkChunk2 childRt) (zip [0 ..] chunks)
+        mapM_ awaitChunkResult vars
+
+      forkChunk2 !childRt (!workerId, (!start, !end)) = do
+        var <- newEmptyMVar
+        _ <-
+          forkIOWithUnmask $ \unmask -> do
+            let workerRt = childRt {rtWorkerId = Just workerId}
+            result <- try (unmask (runSequential2 workerRt start end)) :: IO (Either SomeException ())
+            putMVar var result
+        pure var
 
   loopReadArr (Arr _ arr) i = Kernel (\_ -> readPrimArray arr i)
 
   loopWriteArr (Arr _ arr) i x = Kernel (\_ -> writePrimArray arr i x)
 
   loopNewReducer reducer body =
-    Kernel $ \depth -> do
-      redVar <- newRedVar reducer
-      runKernel (body redVar) depth
+    Kernel $ \rt -> do
+      redVar <-
+        if shouldShareReducer rt
+          then newSharedRedVar (parallelWorkers rt) reducer
+          else newLocalRedVar reducer
+      runKernel (body redVar) rt
 
-  loopReduce (RedVar var spec) x =
-    Kernel $ \_ -> do
-      !acc <- readPrimVar var
-      let !acc' = reducerStep spec acc x
-      writePrimVar var acc'
+  loopReduce redVar x =
+    Kernel $ \rt ->
+      case redVar of
+        LocalRedVar var spec -> do
+          !acc <- readPrimVar var
+          let !acc' = reducerStep spec acc x
+          writePrimVar var acc'
+        SharedRedVar vars _ spec -> do
+          let !slot = reducerSlot rt
+          var <- readArray vars slot
+          !acc <- readPrimVar var
+          let !acc' = reducerStep spec acc x
+          writePrimVar var acc'
 
-  loopGetReducer (RedVar var spec) = Kernel $ \_ -> do
-    !acc <- readPrimVar var
-    pure (reducerDone spec acc)
+  loopGetReducer redVar =
+    Kernel $ \rt ->
+      case redVar of
+        LocalRedVar var spec -> do
+          !acc <- readPrimVar var
+          pure (reducerDone spec acc)
+        SharedRedVar vars workers spec -> do
+          if rtWorkerId rt /= Nothing || rtLoopDepth rt > 0
+            then invalidUsage "getReducer may only be used between parallel phases"
+            else combineSharedReducer vars workers spec
 
-  loopFoldFor (Reducer spec) n body = Kernel $ \depth ->
-    go depth 0 (reducerInit spec)
-    where
-      go !depth !i !acc
-        | i >= n = pure (reducerDone spec acc)
-        | otherwise = do
-            x <- runKernel (body i) depth
-            let !acc' = reducerStep spec acc x
-            go depth (i + 1) acc'
+  loopAccumFor n initial body = Kernel $ \rt ->
+    let go !i !acc
+          | i >= n = pure acc
+          | otherwise = do
+              acc' <- runKernel (body acc i) rt
+              go (i + 1) acc'
+     in go 0 initial
+
+  loopNewAcc initial body =
+    Kernel $ \rt -> do
+      var <- newPrimVar initial
+      runKernel (body (AccVar var)) rt
+
+  loopReadAcc (AccVar var) = Kernel (\_ -> readPrimVar var)
+
+  loopWriteAcc (AccVar var) x = Kernel (\_ -> writePrimVar var x)
+
+  loopFoldFor (Reducer spec) n body = Kernel $ \rt ->
+    let go !i !acc
+          | i >= n = pure (reducerDone spec acc)
+          | otherwise = do
+              x <- runKernel (body i) rt
+              let !acc' = reducerStep spec acc x
+              go (i + 1) acc'
+     in go 0 (reducerInit spec)
 
 {-# INLINE newArr #-}
 newArr :: Prim a => Int -> IO (Arr a)
@@ -204,12 +352,28 @@ toList arr = go 0
 
 {-# INLINE runProg #-}
 runProg :: Prog a -> IO a
-runProg (Prog m) = runKernel (m pure) 0
+runProg (Prog m) = runKernel (m pure) (Runtime Nothing Nothing 0)
+
+{-# INLINE parallel #-}
+parallel :: Prog a -> Prog a
+parallel body = Prog $ \k -> loopParallel (unProg body k)
+
+{-# INLINE barrier #-}
+barrier :: Prog ()
+barrier = Prog $ \k -> do
+  loopBarrier
+  k ()
 
 {-# INLINE parFor #-}
 parFor :: Int -> (Int -> Prog ()) -> Prog ()
 parFor n body = Prog $ \k -> do
   loopParFor n (\i -> unProg (body i) (\() -> pure ()))
+  k ()
+
+{-# INLINE parFor2 #-}
+parFor2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
+parFor2 n m body = Prog $ \k -> do
+  loopParFor2 n m (\i j -> unProg (body i j) (\() -> pure ()))
   k ()
 
 {-# INLINE readArr #-}
@@ -237,6 +401,26 @@ reduce redVar x = Prog $ \k -> do
 getReducer :: RedVar a -> Prog a
 getReducer redVar = Prog $ \k -> loopGetReducer redVar >>= k
 
+{-# INLINE accumFor #-}
+accumFor :: Int -> a -> (a -> Int -> Prog a) -> Prog a
+accumFor n initial body =
+  Prog $ \k -> loopAccumFor n initial (\acc i -> unProg (body acc i) pure) >>= k
+
+{-# INLINE newAcc #-}
+newAcc :: Prim a => a -> (AccVar a -> Prog r) -> Prog r
+newAcc initial body = Prog $ \k ->
+  loopNewAcc initial (\accVar -> unProg (body accVar) k)
+
+{-# INLINE readAcc #-}
+readAcc :: Prim a => AccVar a -> Prog a
+readAcc accVar = Prog $ \k -> loopReadAcc accVar >>= k
+
+{-# INLINE writeAcc #-}
+writeAcc :: Prim a => AccVar a -> a -> Prog ()
+writeAcc accVar x = Prog $ \k -> do
+  loopWriteAcc accVar x
+  k ()
+
 {-# INLINE foldFor #-}
 foldFor :: Reducer a -> Int -> (Int -> Prog a) -> Prog a
 foldFor reducer n body =
@@ -244,24 +428,103 @@ foldFor reducer n body =
 
 {-# INLINE mkReducer #-}
 mkReducer :: Prim rep => rep -> (rep -> a -> rep) -> (rep -> a) -> Reducer a
-mkReducer initial step done = Reducer (ReducerSpec initial step done)
+mkReducer initial step done = mkReducerWith initial step merge done
+  where
+    merge !left !right = step left (done right)
+
+{-# INLINE mkReducerWith #-}
+mkReducerWith ::
+  Prim rep =>
+  rep ->
+  (rep -> a -> rep) ->
+  (rep -> rep -> rep) ->
+  (rep -> a) ->
+  Reducer a
+mkReducerWith initial step merge done =
+  Reducer
+    ReducerSpec
+      { reducerInit = initial
+      , reducerStep = step
+      , reducerMerge = merge
+      , reducerDone = done
+      }
 
 {-# INLINE intSum #-}
 intSum :: Reducer Int
-intSum = mkReducer 0 step id
+intSum = mkReducerWith 0 step merge id
   where
     step !acc !x = acc + x
+    merge !left !right = left + right
 
 {-# INLINE doubleSum #-}
 doubleSum :: Reducer Double
-doubleSum = mkReducer 0 step id
+doubleSum = mkReducerWith 0 step merge id
   where
     step !acc !x = acc + x
+    merge !left !right = left + right
 
-newRedVar :: Reducer a -> IO (RedVar a)
-newRedVar (Reducer spec) = do
+shouldShareReducer :: Runtime -> Bool
+shouldShareReducer rt =
+  case (rtParallelWorkers rt, rtWorkerId rt, rtLoopDepth rt) of
+    (Just _, Nothing, 0) -> True
+    _ -> False
+
+parallelWorkers :: Runtime -> Int
+parallelWorkers rt =
+  case rtParallelWorkers rt of
+    Just workers -> workers
+    Nothing -> 1
+
+reducerSlot :: Runtime -> Int
+reducerSlot rt =
+  case rtWorkerId rt of
+    Just workerId -> workerId
+    Nothing -> 0
+
+newLocalRedVar :: Reducer a -> IO (RedVar a)
+newLocalRedVar (Reducer spec) = do
   var <- newPrimVar (reducerInit spec)
-  pure (RedVar var spec)
+  pure (LocalRedVar var spec)
+
+newSharedRedVar :: Int -> Reducer a -> IO (RedVar a)
+newSharedRedVar workers (Reducer spec) = do
+  let !count = max 1 workers
+  firstVar <- newPrimVar (reducerInit spec)
+  vars <- newArray count firstVar
+  let fill !i
+        | i >= count = pure ()
+        | otherwise = do
+            var <- newPrimVar (reducerInit spec)
+            writeArray vars i var
+            fill (i + 1)
+  fill 1
+  pure (SharedRedVar vars count spec)
+
+combineSharedReducer ::
+  Prim rep =>
+  MutableArray RealWorld (PrimVar RealWorld rep) ->
+  Int ->
+  ReducerSpec rep a ->
+  IO a
+combineSharedReducer vars workers spec = do
+  firstVar <- readArray vars 0
+  !firstAcc <- readPrimVar firstVar
+  let go !i !acc
+        | i >= workers = pure (reducerDone spec acc)
+        | otherwise = do
+            var <- readArray vars i
+            !partial <- readPrimVar var
+            let !acc' = reducerMerge spec acc partial
+            go (i + 1) acc'
+  go 1 firstAcc
+
+invalidUsage :: String -> IO a
+invalidUsage = throwIO . userError
+
+awaitChunkResult :: MVar (Either SomeException ()) -> IO ()
+awaitChunkResult var = do
+  result <- takeMVar var
+  either throwIO pure result
 
 chunkRanges :: Int -> Int -> [(Int, Int)]
 chunkRanges !workers !n = go 0

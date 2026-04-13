@@ -2,6 +2,7 @@
 
 module Main (main) where
 
+import Control.Exception (SomeException, try)
 import Control.Monad (unless)
 import Loom
 
@@ -9,6 +10,10 @@ main :: IO ()
 main = do
   testArrayUpdate
   testReducerSum
+  testAccumFor
+  testParallelReducerScope
+  testAccumulatorPhases
+  testBarrierRejectedInLoop
   testMatrixMultiply
   putStrLn "All loom-hs tests passed."
 
@@ -30,6 +35,59 @@ testReducerSum = do
       readArr arr i
   assertEqual "reducer sum" 55 total
 
+testAccumFor :: IO ()
+testAccumFor = do
+  arr <- fromList [1 .. 5 :: Int]
+  total <- runProg $
+    accumFor (sizeOfArr arr) 0 $ \acc i -> do
+      x <- readArr arr i
+      pure (acc + x * 2)
+  assertEqual "accumFor" 30 total
+
+testParallelReducerScope :: IO ()
+testParallelReducerScope = do
+  total <- runProg $
+    parallel $
+      newReducer intSum $ \sumVar -> do
+        parFor 10 $ \i ->
+          reduce sumVar (i + 1)
+        barrier
+        parFor 10 $ \i ->
+          reduce sumVar (i + 1)
+        getReducer sumVar
+  assertEqual "parallel reducer scope" 110 total
+
+testAccumulatorPhases :: IO ()
+testAccumulatorPhases = do
+  arr <- newArr 6
+  runProg $
+    parallel $ do
+      parFor 6 $ \i ->
+        writeArr arr i i
+      barrier
+      parFor 6 $ \i ->
+        newAcc (0 :: Int) $ \tmp -> do
+          x <- readArr arr i
+          writeAcc tmp (x * 3)
+          y <- readAcc tmp
+          writeArr arr i (y + 1)
+  xs <- toList arr
+  assertEqual "accumulator phases" [1, 4, 7, 10, 13, 16] xs
+
+testBarrierRejectedInLoop :: IO ()
+testBarrierRejectedInLoop = do
+  result <-
+    ( try $
+        runProg $
+          parallel $
+            parFor 4 $ \_ ->
+              barrier
+    ) ::
+      IO (Either SomeException ())
+  case result of
+    Left _ -> pure ()
+    Right _ -> error "barrier in loop should fail"
+
 testMatrixMultiply :: IO ()
 testMatrixMultiply = do
   let rowsA = 2
@@ -39,13 +97,14 @@ testMatrixMultiply = do
   b <- fromList [7, 8, 9, 10, 11, 12 :: Int]
   c <- newArr (rowsA * colsB)
   runProg $
-    parFor (rowsA * colsB) $ \idx -> do
-      let (!i, !j) = idx `divMod` colsB
-      total <- foldFor intSum colsA $ \k -> do
-          lhs <- readArr a (i * colsA + k)
-          rhs <- readArr b (k * colsB + j)
-          pure (lhs * rhs)
-      writeArr c idx total
+    parallel $
+      parFor2 rowsA colsB $ \i j ->
+        do
+          total <- accumFor colsA 0 $ \sumVar k -> do
+            lhs <- readArr a (i * colsA + k)
+            rhs <- readArr b (k * colsB + j)
+            pure (sumVar + lhs * rhs)
+          writeArr c (i * colsB + j) total
   xs <- toList c
   assertEqual "matrix multiply" [58, 64, 139, 154] xs
 
