@@ -10,6 +10,7 @@ import Loom.Benchmark.Kernels
   ( runRedBlackStencilExample
   , runSeparableBlurExample
   , runThreePhaseNormalizeExample
+  , runWavefrontEditDistanceExample
   )
 
 main :: IO ()
@@ -37,9 +38,15 @@ main = do
   testTransform2DIdentity
   testTransform2DTile
   testTransform2DSkewTile
+  testTransform2DSkewCompose
+  testTransform2DSkewInterchange
   testTransform2DRejectsSingularAffine
   testTiledFor2D
   testTiledMatrixMultiply
+  testWavefrontFillCoverage
+  testWavefrontEdgeCases
+  testWavefrontPascal
+  testWavefrontEditDistanceBenchmark
   putStrLn "All loom-hs tests passed."
 
 testArrayUpdate :: IO ()
@@ -275,6 +282,24 @@ testTransform2DSkewTile = do
   xs <- runTransformFill transform
   assertEqual "transform 2d skew+tile" expectedAffineFill xs
 
+testTransform2DSkewCompose :: IO ()
+testTransform2DSkewCompose = do
+  let transform =
+        composeTransform2D
+          (skewTransform2D 1)
+          (skewTransform2D 2)
+  xs <- runTransformFill transform
+  assertEqual "transform 2d skew+skew" expectedAffineFill xs
+
+testTransform2DSkewInterchange :: IO ()
+testTransform2DSkewInterchange = do
+  let transform =
+        composeTransform2D
+          (skewTransform2D 1)
+          interchangeTransform2D
+  xs <- runTransformFill transform
+  assertEqual "transform 2d skew+interchange" expectedAffineFill xs
+
 testTransform2DRejectsSingularAffine :: IO ()
 testTransform2DRejectsSingularAffine = do
   result <-
@@ -324,6 +349,79 @@ testTiledMatrixMultiply = do
           writeArr c (i * colsB + j) total
   xs <- toList c
   assertEqual "tiled matrix multiply" [58, 64, 139, 154] xs
+
+testWavefrontFillCoverage :: IO ()
+testWavefrontFillCoverage = do
+  let rows = 4
+      cols = 5
+      shape = sh2 rows cols
+  arr <- fromList (replicate (rows * cols) (-1 :: Int))
+  runProg $
+    parallel $
+      parForWavefront2D shape $ \ix ->
+        withIx2 ix $ \i j ->
+          writeArr arr (index2 shape ix) (i * 10 + j)
+  xs <- toList arr
+  assertEqual
+    "wavefront fill coverage"
+    [i * 10 + j | i <- [0 .. rows - 1], j <- [0 .. cols - 1]]
+    xs
+
+testWavefrontEdgeCases :: IO ()
+testWavefrontEdgeCases = do
+  emptyRows <-
+    runProg $
+      parallel $
+        newReducer intSum $ \sumVar -> do
+          parForWavefront2D (sh2 0 4) $ \_ ->
+            reduce sumVar 1
+          getReducer sumVar
+  emptyCols <-
+    runProg $
+      parallel $
+        newReducer intSum $ \sumVar -> do
+          parForWavefront2D (sh2 4 0) $ \_ ->
+            reduce sumVar 1
+          getReducer sumVar
+  singleton <-
+    runProg $
+      parallel $
+        newReducer intSum $ \sumVar -> do
+          parForWavefront2D (sh2 1 1) $ \_ ->
+            reduce sumVar 1
+          getReducer sumVar
+  assertEqual "wavefront empty rows" 0 emptyRows
+  assertEqual "wavefront empty cols" 0 emptyCols
+  assertEqual "wavefront singleton" 1 singleton
+
+testWavefrontPascal :: IO ()
+testWavefrontPascal = do
+  let rows = 5
+      cols = 6
+  arr <- newArr (rows * cols)
+  runProg $
+    parallel $ do
+      parFor rows $ \i ->
+        writeArr arr (i * cols) 1
+      barrier
+      parFor (cols - 1) $ \j0 ->
+        let j = j0 + 1
+         in writeArr arr j 1
+      barrier
+      parForWavefront2D (sh2 (rows - 1) (cols - 1)) $ \ix ->
+        withIx2 ix $ \i0 j0 -> do
+          let i = i0 + 1
+              j = j0 + 1
+          up <- readArr arr ((i - 1) * cols + j)
+          left <- readArr arr (i * cols + (j - 1))
+          writeArr arr (i * cols + j) (up + left)
+  xs <- toList arr
+  assertEqual "wavefront pascal" (expectedWavefrontPascal rows cols) xs
+
+testWavefrontEditDistanceBenchmark :: IO ()
+testWavefrontEditDistanceBenchmark = do
+  distance <- runWavefrontEditDistanceExample [1, 2, 3, 4] [1, 3, 4]
+  assertEqual "wavefront edit distance benchmark" 1 distance
 
 runAffineFill :: Affine2 -> IO [Int]
 runAffineFill transform = do
@@ -412,6 +510,32 @@ expectedSeparableBlur n input =
       | i <- [0 .. n - 1]
       , j <- [0 .. n - 1]
       ]
+
+expectedWavefrontPascal :: Int -> Int -> [Int]
+expectedWavefrontPascal rows cols =
+  goRows 0 []
+  where
+    goRows i builtRowsRev
+      | i >= rows = concat (reverse builtRowsRev)
+      | otherwise =
+          let prevRow =
+                case builtRowsRev of
+                  priorRow : _ -> priorRow
+                  [] -> []
+              row = buildRow i prevRow 0 []
+           in goRows (i + 1) (row : builtRowsRev)
+
+    buildRow i prevRow j rowRev
+      | j >= cols = reverse rowRev
+      | i == 0 || j == 0 = buildRow i prevRow (j + 1) (1 : rowRev)
+      | otherwise =
+          let up = prevRow !! j
+              left =
+                case rowRev of
+                  leftValue : _ -> leftValue
+                  [] -> error "wavefront pascal row prefix unexpectedly empty"
+              !cell = up + left
+           in buildRow i prevRow (j + 1) (cell : rowRev)
 
 isInteriorCell :: Int -> Int -> Int -> Bool
 isInteriorCell n i j = i > 0 && i + 1 < n && j > 0 && j + 1 < n

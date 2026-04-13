@@ -57,6 +57,7 @@ module Loom.Internal.Kernel
   , parForRect2D
   , parForAffineRect2D
   , parForAffine2D
+  , parForWavefront2D
   , tileRect2D
   , tiledForRect2D
   , parForTransform2D
@@ -142,12 +143,16 @@ data Affine2 =
     {-# UNPACK #-} !Int
     {-# UNPACK #-} !Int
 
+data Domain2D
+  = RectDomain !Rect2
+  | SkewDomain !Rect2 !Int
+
 newtype Transform2D = Transform2D
   { applyTransform2D ::
       forall repr.
       Loop repr =>
-      Rect2 ->
-      (Rect2 -> (Ix2 -> repr ()) -> repr ()) ->
+      Domain2D ->
+      (Domain2D -> (Ix2 -> repr ()) -> repr ()) ->
       (Ix2 -> repr ()) ->
       repr ()
   }
@@ -568,25 +573,33 @@ identityAffine2 = Affine2 1 0 0 1 0 0
 
 {-# INLINE identityTransform2D #-}
 identityTransform2D :: Transform2D
-identityTransform2D = Transform2D (\rect k emit -> k rect emit)
+identityTransform2D = Transform2D (\domain k emit -> k domain emit)
 
 {-# INLINE affineTransform2D #-}
 affineTransform2D :: Affine2 -> Transform2D
 affineTransform2D affine =
-  Transform2D $ \rect k emit ->
-    applyAffineRect2DRepr affine rect k emit
+  case classifyAffine2 affine of
+    StructuredIdentity ->
+      identityTransform2D
+    StructuredInterchange ->
+      interchangeTransform2D
+    StructuredSkew factor ->
+      skewTransform2D factor
+    StructuredGeneric ->
+      Transform2D $ \domain k emit ->
+        applyAffineDomain2DRepr affine domain k emit
 
 {-# INLINE tileTransform2D #-}
 tileTransform2D :: Int -> Int -> Transform2D
 tileTransform2D tileRows tileCols =
-  Transform2D $ \rect k emit ->
-    tileRect2DRepr tileRows tileCols rect (\tileRect -> k tileRect emit)
+  Transform2D $ \domain k emit ->
+    tileDomain2DRepr tileRows tileCols domain (\tileDomain -> k tileDomain emit)
 
 {-# INLINE composeTransform2D #-}
 composeTransform2D :: Transform2D -> Transform2D -> Transform2D
 composeTransform2D left right =
-  Transform2D $ \rect k emit ->
-    applyTransform2D left rect (\rect' emit' -> applyTransform2D right rect' k emit') emit
+  Transform2D $ \domain k emit ->
+    applyTransform2D left domain (\domain' emit' -> applyTransform2D right domain' k emit') emit
 
 {-# INLINE interchange2D #-}
 interchange2D :: Affine2
@@ -594,7 +607,15 @@ interchange2D = Affine2 0 1 1 0 0 0
 
 {-# INLINE interchangeTransform2D #-}
 interchangeTransform2D :: Transform2D
-interchangeTransform2D = affineTransform2D interchange2D
+interchangeTransform2D =
+  Transform2D $ \domain k emit ->
+    case domain of
+      RectDomain rect ->
+        k
+          (RectDomain (transposeRect2 rect))
+          (\ix -> emit (applyAffine2 interchange2D ix))
+      SkewDomain _ _ ->
+        applyAffineDomain2DRepr interchange2D domain k emit
 
 {-# INLINE skew2D #-}
 skew2D :: Int -> Affine2
@@ -602,7 +623,11 @@ skew2D factor = Affine2 1 0 factor 1 0 0
 
 {-# INLINE skewTransform2D #-}
 skewTransform2D :: Int -> Transform2D
-skewTransform2D = affineTransform2D . skew2D
+skewTransform2D factor =
+  Transform2D $ \domain k emit ->
+    k
+      (skewDomain2D factor domain)
+      (\ix -> emit (applyAffine2 (Affine2 1 0 (-factor) 1 0 0) ix))
 
 {-# INLINE boundingBoxAffine2D #-}
 boundingBoxAffine2D :: Affine2 -> Rect2 -> Rect2
@@ -681,6 +706,15 @@ parForAffine2D :: Affine2 -> Sh2 -> (Ix2 -> Prog ()) -> Prog ()
 parForAffine2D affine shape =
   parForAffineRect2D affine (rectOfShape2 shape)
 
+{-# INLINE parForWavefront2D #-}
+parForWavefront2D :: Sh2 -> (Ix2 -> Prog ()) -> Prog ()
+parForWavefront2D shape body =
+  Prog $ \k -> do
+    parForWavefrontRect2DRepr
+      (rectOfShape2 shape)
+      (\ix -> unProg (body ix) (\() -> pure ()))
+    k ()
+
 {-# INLINE tileRect2D #-}
 tileRect2D :: Int -> Int -> Rect2 -> (Rect2 -> Prog ()) -> Prog ()
 tileRect2D tileRows tileCols (Rect2 rowLo colLo rowHi colHi) body =
@@ -701,8 +735,8 @@ parForTransform2D :: Transform2D -> Sh2 -> (Ix2 -> Prog ()) -> Prog ()
 parForTransform2D transform shape body =
   Prog $ \k -> do
     applyTransform2D transform
-      (rectOfShape2 shape)
-      parForRect2DRepr
+      (RectDomain (rectOfShape2 shape))
+      parForDomain2DRepr
       (\ix -> unProg (body ix) (\() -> pure ()))
     k ()
 
@@ -1059,6 +1093,11 @@ chunkSizeFor workers total =
 rectOfShape2 :: Sh2 -> Rect2
 rectOfShape2 (Sh2 rows cols) = Rect2 0 0 rows cols
 
+{-# INLINE transposeRect2 #-}
+transposeRect2 :: Rect2 -> Rect2
+transposeRect2 (Rect2 rowLo colLo rowHi colHi) =
+  Rect2 colLo rowLo colHi rowHi
+
 {-# INLINE isEmptyRect2 #-}
 isEmptyRect2 :: Rect2 -> Bool
 isEmptyRect2 (Rect2 rowLo colLo rowHi colHi) =
@@ -1068,6 +1107,60 @@ isEmptyRect2 (Rect2 rowLo colLo rowHi colHi) =
 inRect2 :: Rect2 -> Ix2 -> Bool
 inRect2 (Rect2 rowLo colLo rowHi colHi) (Ix2 row col) =
   row >= rowLo && row < rowHi && col >= colLo && col < colHi
+
+data StructuredAffine2D
+  = StructuredIdentity
+  | StructuredInterchange
+  | StructuredSkew !Int
+  | StructuredGeneric
+
+{-# INLINE classifyAffine2 #-}
+classifyAffine2 :: Affine2 -> StructuredAffine2D
+classifyAffine2 (Affine2 1 0 0 1 0 0) = StructuredIdentity
+classifyAffine2 (Affine2 0 1 1 0 0 0) = StructuredInterchange
+classifyAffine2 (Affine2 1 0 factor 1 0 0) = StructuredSkew factor
+classifyAffine2 _ = StructuredGeneric
+
+{-# INLINE domainRect2 #-}
+domainRect2 :: Domain2D -> Rect2
+domainRect2 (RectDomain rect) = rect
+domainRect2 (SkewDomain rect _) = rect
+
+{-# INLINE domainAffine2 #-}
+domainAffine2 :: Domain2D -> Affine2
+domainAffine2 (RectDomain _) = identityAffine2
+domainAffine2 (SkewDomain _ factor) = skew2D factor
+
+{-# INLINE skewDomain2D #-}
+skewDomain2D :: Int -> Domain2D -> Domain2D
+skewDomain2D factor (RectDomain rect) = SkewDomain rect factor
+skewDomain2D factor (SkewDomain rect factor0) = SkewDomain rect (factor0 + factor)
+
+{-# INLINE inDomain2D #-}
+inDomain2D :: Domain2D -> Ix2 -> Bool
+inDomain2D (RectDomain rect) ix = inRect2 rect ix
+inDomain2D (SkewDomain rect factor) ix =
+  inRect2 rect (applyAffine2 (Affine2 1 0 (-factor) 1 0 0) ix)
+
+{-# INLINE boundingBoxAffineDomain2D #-}
+boundingBoxAffineDomain2D :: Affine2 -> Domain2D -> Rect2
+boundingBoxAffineDomain2D affine domain =
+  boundingBoxAffine2D
+    (composeAffine2 affine (domainAffine2 domain))
+    (domainRect2 domain)
+
+{-# INLINE parForDomain2DRepr #-}
+parForDomain2DRepr ::
+  Loop repr =>
+  Domain2D ->
+  (Ix2 -> repr ()) ->
+  repr ()
+parForDomain2DRepr (RectDomain rect) body =
+  parForRect2DRepr rect body
+parForDomain2DRepr (SkewDomain rect factor) body =
+  parForRect2DRepr rect $ \ix ->
+    withIx2 ix $ \row col ->
+      body (Ix2 row (col + factor * row))
 
 {-# INLINE parForRect2DRepr #-}
 parForRect2DRepr ::
@@ -1084,10 +1177,39 @@ parForRect2DRepr (Rect2 rowLo colLo rowHi colHi) body =
             I# rowCount# ->
               case colHi - colLo of
                 I# colCount# ->
-                    loopParFor2#
-                      rowCount#
-                      colCount#
-                      (\i# j# -> body (Ix2 (I# (rowLo# +# i#)) (I# (colLo# +# j#))))
+                      loopParFor2#
+                        rowCount#
+                        colCount#
+                        (\i# j# -> body (Ix2 (I# (rowLo# +# i#)) (I# (colLo# +# j#))))
+
+{-# INLINE parForWavefrontRect2DRepr #-}
+parForWavefrontRect2DRepr ::
+  Loop repr =>
+  Rect2 ->
+  (Ix2 -> repr ()) ->
+  repr ()
+parForWavefrontRect2DRepr (Rect2 rowLo colLo rowHi colHi) body
+  | rows <= 0 || cols <= 0 = pure ()
+  | otherwise = go 0
+  where
+    !rows = rowHi - rowLo
+    !cols = colHi - colLo
+    !maxDiag = rows + cols - 1
+
+    go !diag
+      | diag >= maxDiag = pure ()
+      | otherwise =
+          let !rowStart = max 0 (diag - (cols - 1))
+              !rowEnd = min (rows - 1) diag
+              !count = rowEnd - rowStart + 1
+           in if count <= 0
+                then go (diag + 1)
+                else do
+                  loopParFor count $ \offset ->
+                    let !row = rowLo + rowStart + offset
+                        !col = colLo + diag - (rowStart + offset)
+                     in body (Ix2 row col)
+                  go (diag + 1)
 
 {-# INLINE applyAffineRect2DRepr #-}
 applyAffineRect2DRepr ::
@@ -1098,17 +1220,32 @@ applyAffineRect2DRepr ::
   (Ix2 -> repr ()) ->
   repr ()
 applyAffineRect2DRepr affine rect k emit =
+  applyAffineDomain2DRepr
+    affine
+    (RectDomain rect)
+    (\domain emit' -> k (domainRect2 domain) emit')
+    emit
+
+{-# INLINE applyAffineDomain2DRepr #-}
+applyAffineDomain2DRepr ::
+  Loop repr =>
+  Affine2 ->
+  Domain2D ->
+  (Domain2D -> (Ix2 -> repr ()) -> repr ()) ->
+  (Ix2 -> repr ()) ->
+  repr ()
+applyAffineDomain2DRepr affine domain k emit =
   case invertAffine2 affine of
     Nothing ->
       invalidUsageRepr "affine loop transformations require an invertible integer transform"
     Just inverse ->
-      let !box = boundingBoxAffine2D affine rect
+      let !box = boundingBoxAffineDomain2D affine domain
           emit' ix' =
             let !ix = applyAffine2 inverse ix'
-             in case inRect2 rect ix of
+             in case inDomain2D domain ix of
                   True -> emit ix
                   False -> pure ()
-       in k box emit'
+       in k (RectDomain box) emit'
 
 {-# INLINE tileRect2DRepr #-}
 tileRect2DRepr ::
@@ -1153,7 +1290,20 @@ tileRect2DRepr tileRows tileCols (Rect2 rowLo colLo rowHi colHi) body =
                                                    !colCount# = tileSpan# cols# (tileJ# *# tileCols#) tileCols#
                                                 in body
                                                      (Rect2
-                                                        (I# row0#)
-                                                        (I# col0#)
-                                                        (I# (row0# +# rowCount#))
-                                                        (I# (col0# +# colCount#))))
+                                                         (I# row0#)
+                                                         (I# col0#)
+                                                         (I# (row0# +# rowCount#))
+                                                         (I# (col0# +# colCount#))))
+
+{-# INLINE tileDomain2DRepr #-}
+tileDomain2DRepr ::
+  Loop repr =>
+  Int ->
+  Int ->
+  Domain2D ->
+  (Domain2D -> repr ()) ->
+  repr ()
+tileDomain2DRepr tileRows tileCols (RectDomain rect) body =
+  tileRect2DRepr tileRows tileCols rect (\tileRect -> body (RectDomain tileRect))
+tileDomain2DRepr tileRows tileCols (SkewDomain rect factor) body =
+  tileRect2DRepr tileRows tileCols rect (\tileRect -> body (SkewDomain tileRect factor))

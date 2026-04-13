@@ -52,6 +52,7 @@ module Loom
   , parForRect2D
   , parForAffineRect2D
   , parForAffine2D
+  , parForWavefront2D
   , tileRect2D
   , tiledForRect2D
   , parForTransform2D
