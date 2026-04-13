@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE RankNTypes #-}
 
 module Loom.Internal.Kernel
@@ -77,6 +78,17 @@ import Data.Primitive.PrimVar
   )
 import Data.Primitive.Types (Prim)
 import GHC.Conc (getNumCapabilities)
+import GHC.Exts
+  ( Int (I#)
+  , Int#
+  , (*#)
+  , (+#)
+  , (-#)
+  , (<#)
+  , (<=#)
+  , (>=#)
+  , quotInt#
+  )
 
 data Arr a = Arr !Int !(MutablePrimArray RealWorld a)
 
@@ -118,7 +130,7 @@ class Monad repr => Loop repr where
   loopParallel :: repr a -> repr a
   loopBarrier :: repr ()
   loopParFor :: Int -> (Int -> repr ()) -> repr ()
-  loopParFor2 :: Int -> Int -> (Int -> Int -> repr ()) -> repr ()
+  loopParFor2# :: Int# -> Int# -> (Int# -> Int# -> repr ()) -> repr ()
   loopReadArr :: Prim a => Arr a -> Int -> repr a
   loopWriteArr :: Prim a => Arr a -> Int -> a -> repr ()
   loopNewReducer :: Reducer a -> (RedVar a -> repr r) -> repr r
@@ -229,40 +241,51 @@ instance Loop Kernel where
             | i >= end = pure ()
             | otherwise = runKernel (body i) workerRt >> goChunk (i + 1)
 
-  loopParFor2 n m body = Kernel $ \rt ->
-    if n <= 0 || m <= 0
-      then pure ()
-      else do
-        let !total = n * m
-        workers0 <-
-          case rtParallelWorkers rt of
-            Just workers -> pure workers
-            Nothing -> getNumCapabilities
-        let !workers = min total (max 1 workers0)
-            childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
-            canRunParallel =
-              rtLoopDepth rt == 0
-                && rtWorkerId rt == Nothing
-                && workers > 1
-        if canRunParallel
-          then runParallel2 total workers childRt
-          else runSequential2 childRt 0 total
+  loopParFor2# n# m# body = Kernel $ \rt ->
+    case n# <=# 0# of
+      1# -> pure ()
+      _ ->
+        case m# <=# 0# of
+          1# -> pure ()
+          _ -> do
+            let !total# = n# *# m#
+                !total = I# total#
+            workers0 <-
+              case rtParallelWorkers rt of
+                Just workers -> pure workers
+                Nothing -> getNumCapabilities
+            let !workers = min total (max 1 workers0)
+                childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
+                canRunParallel =
+                  rtLoopDepth rt == 0
+                    && rtWorkerId rt == Nothing
+                    && workers > 1
+            if canRunParallel
+              then runParallel2 total workers childRt
+              else runSequential2 childRt 0 total
     where
-      runSequential2 !childRt !start !end
-        | start >= end = pure ()
-        | otherwise =
-            let !i0 = start `quot` m
-                !j0 = start - i0 * m
-             in go2 childRt start end i0 j0
+      runSequential2 !childRt !start !end =
+        case start of
+          I# start# ->
+            case end of
+              I# end# ->
+                case start# >=# end# of
+                  1# -> pure ()
+                  _ ->
+                    let !i0# = quotInt# start# m#
+                        !j0# = start# -# (i0# *# m#)
+                     in go2 childRt start# end# i0# j0#
 
-      go2 !childRt !idx !end !i !j
-        | idx >= end = pure ()
-        | otherwise = do
-            runKernel (body i j) childRt
-            let !j' = j + 1
-            if j' < m
-              then go2 childRt (idx + 1) end i j'
-              else go2 childRt (idx + 1) end (i + 1) 0
+      go2 !childRt !idx# !end# !i# !j# =
+        case idx# >=# end# of
+          1# -> pure ()
+          _ -> do
+            runKernel (body i# j#) childRt
+            let !j'# = j# +# 1#
+                !idx'# = idx# +# 1#
+            case j'# <# m# of
+              1# -> go2 childRt idx'# end# i# j'#
+              _ -> go2 childRt idx'# end# (i# +# 1#) 0#
 
       runParallel2 !total !workers !childRt = do
         let chunks = chunkRanges workers total
@@ -441,7 +464,11 @@ parForSh1 (Sh1 n) body = Prog $ \k -> do
 {-# INLINE parForSh2 #-}
 parForSh2 :: Sh2 -> (Ix2 -> Prog ()) -> Prog ()
 parForSh2 (Sh2 n m) body =
-  loopParForSh2 n m (\i j -> body (Ix2 i j))
+  case n of
+    I# n# ->
+      case m of
+        I# m# ->
+          loopParForSh2# n# m# (\i# j# -> body (Ix2 (I# i#) (I# j#)))
 
 {-# INLINE parFor2 #-}
 parFor2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
@@ -449,28 +476,77 @@ parFor2 = loopParForSh2
 
 {-# INLINE tile2D #-}
 tile2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
-tile2D tileRows tileCols (Sh2 rows cols) body
-  | tileRows <= 0 = invalidProgUsage "tile2D requires a positive row tile size"
-  | tileCols <= 0 = invalidProgUsage "tile2D requires a positive column tile size"
-  | rows <= 0 || cols <= 0 = pure ()
-  | otherwise =
-      loopParForSh2 (tileCount rows tileRows) (tileCount cols tileCols) $ \tileI tileJ ->
-        body (tileI * tileRows) (tileJ * tileCols)
+tile2D tileRows tileCols (Sh2 rows cols) body =
+  case tileRows of
+    I# tileRows# ->
+      case tileCols of
+        I# tileCols# ->
+          case rows of
+            I# rows# ->
+              case cols of
+                I# cols# ->
+                  case tileRows# <=# 0# of
+                    1# -> invalidProgUsage "tile2D requires a positive row tile size"
+                    _ ->
+                      case tileCols# <=# 0# of
+                        1# -> invalidProgUsage "tile2D requires a positive column tile size"
+                        _ ->
+                          case rows# <=# 0# of
+                            1# -> pure ()
+                            _ ->
+                              case cols# <=# 0# of
+                                1# -> pure ()
+                                _ ->
+                                  loopParForSh2#
+                                    (tileCount# rows# tileRows#)
+                                    (tileCount# cols# tileCols#)
+                                    (\tileI# tileJ# ->
+                                       body
+                                         (I# (tileI# *# tileRows#))
+                                         (I# (tileJ# *# tileCols#)))
 
 {-# INLINE parForTile2D #-}
 parForTile2D :: Int -> Int -> Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
-parForTile2D tileRows tileCols row0 col0 (Sh2 rows cols) body
-  | tileRows <= 0 = invalidProgUsage "parForTile2D requires a positive row tile size"
-  | tileCols <= 0 = invalidProgUsage "parForTile2D requires a positive column tile size"
-  | row0 < 0 = invalidProgUsage "parForTile2D requires a non-negative row origin"
-  | col0 < 0 = invalidProgUsage "parForTile2D requires a non-negative column origin"
-  | rowCount <= 0 || colCount <= 0 = pure ()
-  | otherwise =
-      loopParForSh2 rowCount colCount $ \i j ->
-        body (row0 + i) (col0 + j)
-  where
-    rowCount = tileSpan rows row0 tileRows
-    colCount = tileSpan cols col0 tileCols
+parForTile2D tileRows tileCols row0 col0 (Sh2 rows cols) body =
+  case tileRows of
+    I# tileRows# ->
+      case tileCols of
+        I# tileCols# ->
+          case row0 of
+            I# row0# ->
+              case col0 of
+                I# col0# ->
+                  case rows of
+                    I# rows# ->
+                      case cols of
+                        I# cols# ->
+                          case tileRows# <=# 0# of
+                            1# -> invalidProgUsage "parForTile2D requires a positive row tile size"
+                            _ ->
+                              case tileCols# <=# 0# of
+                                1# -> invalidProgUsage "parForTile2D requires a positive column tile size"
+                                _ ->
+                                  case row0# <# 0# of
+                                    1# -> invalidProgUsage "parForTile2D requires a non-negative row origin"
+                                    _ ->
+                                      case col0# <# 0# of
+                                        1# -> invalidProgUsage "parForTile2D requires a non-negative column origin"
+                                        _ ->
+                                          let !rowCount# = tileSpan# rows# row0# tileRows#
+                                              !colCount# = tileSpan# cols# col0# tileCols#
+                                           in case rowCount# <=# 0# of
+                                                1# -> pure ()
+                                                _ ->
+                                                  case colCount# <=# 0# of
+                                                    1# -> pure ()
+                                                    _ ->
+                                                      loopParForSh2#
+                                                        rowCount#
+                                                        colCount#
+                                                        (\i# j# ->
+                                                           body
+                                                             (I# (row0# +# i#))
+                                                             (I# (col0# +# j#)))
 
 {-# INLINE tiledFor2D #-}
 tiledFor2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
@@ -567,18 +643,27 @@ doubleSum = mkReducerWith 0 step merge id
 
 {-# INLINE loopParForSh2 #-}
 loopParForSh2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
-loopParForSh2 rows cols body =
+loopParForSh2 (I# rows#) (I# cols#) body =
+  loopParForSh2# rows# cols# (\i# j# -> body (I# i#) (I# j#))
+
+{-# INLINE loopParForSh2# #-}
+loopParForSh2# :: Int# -> Int# -> (Int# -> Int# -> Prog ()) -> Prog ()
+loopParForSh2# rows# cols# body =
   Prog $ \k -> do
-    loopParFor2 rows cols (\i j -> unProg (body i j) (\() -> pure ()))
+    loopParFor2# rows# cols# (\i# j# -> unProg (body i# j#) (\() -> pure ()))
     k ()
 
-{-# INLINE tileCount #-}
-tileCount :: Int -> Int -> Int
-tileCount len tile = (len + tile - 1) `quot` tile
+{-# INLINE tileCount# #-}
+tileCount# :: Int# -> Int# -> Int#
+tileCount# len# tile# = quotInt# (len# +# (tile# -# 1#)) tile#
 
-{-# INLINE tileSpan #-}
-tileSpan :: Int -> Int -> Int -> Int
-tileSpan len start tile = min tile (len - start)
+{-# INLINE tileSpan# #-}
+tileSpan# :: Int# -> Int# -> Int# -> Int#
+tileSpan# len# start# tile# =
+  let !remaining# = len# -# start#
+   in case remaining# <# tile# of
+        1# -> remaining#
+        _ -> tile#
 
 shouldShareReducer :: Runtime -> Bool
 shouldShareReducer rt =
