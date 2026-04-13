@@ -156,15 +156,29 @@ data Domain2D
   = RectDomain !Rect2
   | SkewDomain !Rect2 !Int
 
-newtype Transform2D = Transform2D
-  { applyTransform2D ::
-      forall repr.
-      Loop repr =>
-      Domain2D ->
-      (Domain2D -> (Ix2 -> repr ()) -> repr ()) ->
-      (Ix2 -> repr ()) ->
-      repr ()
-  }
+newtype Transform2D = Transform2D TransformExpr2D
+
+data TransformExpr2D
+  = TransformIdentity2D
+  | TransformAffineStage2D !Affine2
+  | TransformTileStage2D !Int !Int
+  | TransformCompose2D !TransformExpr2D !TransformExpr2D
+
+data RawTransformStage2D
+  = RawAffineStage2D !Affine2
+  | RawTileStage2D !Int !Int
+
+data CompiledAffine2D
+  = CompiledIdentity2D
+  | CompiledInterchange2D
+  | CompiledSkew2D !Int
+  | CompiledGenericAffine2D !Affine2
+
+data NormalizedTransformStage2D
+  = NormalizedAffineStage2D !CompiledAffine2D
+  | NormalizedTileStage2D !Int !Int
+
+newtype NormalizedTransform2D = NormalizedTransform2D [NormalizedTransformStage2D]
 
 data Vec a = Vec !a !a !a !a
 
@@ -524,33 +538,20 @@ identityAffine2 = Affine2 1 0 0 1 0 0
 
 {-# INLINE identityTransform2D #-}
 identityTransform2D :: Transform2D
-identityTransform2D = Transform2D (\domain k emit -> k domain emit)
+identityTransform2D = Transform2D TransformIdentity2D
 
 {-# INLINE affineTransform2D #-}
 affineTransform2D :: Affine2 -> Transform2D
-affineTransform2D affine =
-  case classifyAffine2 affine of
-    StructuredIdentity ->
-      identityTransform2D
-    StructuredInterchange ->
-      interchangeTransform2D
-    StructuredSkew factor ->
-      skewTransform2D factor
-    StructuredGeneric ->
-      Transform2D $ \domain k emit ->
-        applyAffineDomain2DRepr affine domain k emit
+affineTransform2D affine = Transform2D (TransformAffineStage2D affine)
 
 {-# INLINE tileTransform2D #-}
 tileTransform2D :: Int -> Int -> Transform2D
-tileTransform2D tileRows tileCols =
-  Transform2D $ \domain k emit ->
-    tileDomain2DRepr tileRows tileCols domain (\tileDomain -> k tileDomain emit)
+tileTransform2D tileRows tileCols = Transform2D (TransformTileStage2D tileRows tileCols)
 
 {-# INLINE composeTransform2D #-}
 composeTransform2D :: Transform2D -> Transform2D -> Transform2D
-composeTransform2D left right =
-  Transform2D $ \domain k emit ->
-    applyTransform2D left domain (\domain' emit' -> applyTransform2D right domain' k emit') emit
+composeTransform2D (Transform2D left) (Transform2D right) =
+  Transform2D (TransformCompose2D left right)
 
 {-# INLINE interchange2D #-}
 interchange2D :: Affine2
@@ -558,15 +559,7 @@ interchange2D = Affine2 0 1 1 0 0 0
 
 {-# INLINE interchangeTransform2D #-}
 interchangeTransform2D :: Transform2D
-interchangeTransform2D =
-  Transform2D $ \domain k emit ->
-    case domain of
-      RectDomain rect ->
-        k
-          (RectDomain (transposeRect2 rect))
-          (\ix -> emit (applyAffine2 interchange2D ix))
-      SkewDomain _ _ ->
-        applyAffineDomain2DRepr interchange2D domain k emit
+interchangeTransform2D = affineTransform2D interchange2D
 
 {-# INLINE skew2D #-}
 skew2D :: Int -> Affine2
@@ -574,11 +567,119 @@ skew2D factor = Affine2 1 0 factor 1 0 0
 
 {-# INLINE skewTransform2D #-}
 skewTransform2D :: Int -> Transform2D
-skewTransform2D factor =
-  Transform2D $ \domain k emit ->
-    k
-      (skewDomain2D factor domain)
-      (\ix -> emit (applyAffine2 (Affine2 1 0 (-factor) 1 0 0) ix))
+skewTransform2D factor = affineTransform2D (skew2D factor)
+
+{-# INLINE applyTransform2D #-}
+applyTransform2D ::
+  Loop repr =>
+  Transform2D ->
+  Domain2D ->
+  (Domain2D -> (Ix2 -> repr ()) -> repr ()) ->
+  (Ix2 -> repr ()) ->
+  repr ()
+applyTransform2D transform domain k emit =
+  let !normalized = compileTransform2D transform
+   in applyNormalizedTransform2D normalized domain k emit
+
+{-# INLINE compileTransform2D #-}
+compileTransform2D :: Transform2D -> NormalizedTransform2D
+compileTransform2D (Transform2D expr) =
+  normalizeTransformStages2D (collectTransformStages2D expr [])
+
+{-# INLINE collectTransformStages2D #-}
+collectTransformStages2D ::
+  TransformExpr2D ->
+  [RawTransformStage2D] ->
+  [RawTransformStage2D]
+collectTransformStages2D TransformIdentity2D stages = stages
+collectTransformStages2D (TransformAffineStage2D affine) stages =
+  RawAffineStage2D affine : stages
+collectTransformStages2D (TransformTileStage2D tileRows tileCols) stages =
+  RawTileStage2D tileRows tileCols : stages
+collectTransformStages2D (TransformCompose2D left right) stages =
+  collectTransformStages2D left (collectTransformStages2D right stages)
+
+{-# INLINE normalizeTransformStages2D #-}
+normalizeTransformStages2D :: [RawTransformStage2D] -> NormalizedTransform2D
+normalizeTransformStages2D stages =
+  NormalizedTransform2D (reverse (go stages identityAffine2 []))
+  where
+    go [] !pendingAffine acc =
+      flushNormalizedAffine2D pendingAffine acc
+    go (RawAffineStage2D affine : rest) !pendingAffine acc =
+      go rest (composeAffine2 affine pendingAffine) acc
+    go (RawTileStage2D tileRows tileCols : rest) !pendingAffine acc =
+      go
+        rest
+        identityAffine2
+        (NormalizedTileStage2D tileRows tileCols : flushNormalizedAffine2D pendingAffine acc)
+
+{-# INLINE flushNormalizedAffine2D #-}
+flushNormalizedAffine2D ::
+  Affine2 ->
+  [NormalizedTransformStage2D] ->
+  [NormalizedTransformStage2D]
+flushNormalizedAffine2D affine acc =
+  case compileAffine2D affine of
+    CompiledIdentity2D -> acc
+    compiledAffine -> NormalizedAffineStage2D compiledAffine : acc
+
+{-# INLINE applyNormalizedTransform2D #-}
+applyNormalizedTransform2D ::
+  Loop repr =>
+  NormalizedTransform2D ->
+  Domain2D ->
+  (Domain2D -> (Ix2 -> repr ()) -> repr ()) ->
+  (Ix2 -> repr ()) ->
+  repr ()
+applyNormalizedTransform2D (NormalizedTransform2D stages) =
+  go stages
+  where
+    go [] domain k emit = k domain emit
+    go (stage : rest) domain k emit =
+      applyNormalizedStage2D
+        stage
+        domain
+        (\domain' emit' -> go rest domain' k emit')
+        emit
+
+{-# INLINE applyNormalizedStage2D #-}
+applyNormalizedStage2D ::
+  Loop repr =>
+  NormalizedTransformStage2D ->
+  Domain2D ->
+  (Domain2D -> (Ix2 -> repr ()) -> repr ()) ->
+  (Ix2 -> repr ()) ->
+  repr ()
+applyNormalizedStage2D (NormalizedAffineStage2D affine) domain k emit =
+  applyCompiledAffine2D affine domain k emit
+applyNormalizedStage2D (NormalizedTileStage2D tileRows tileCols) domain k emit =
+  tileDomain2DRepr tileRows tileCols domain (\tileDomain -> k tileDomain emit)
+
+{-# INLINE applyCompiledAffine2D #-}
+applyCompiledAffine2D ::
+  Loop repr =>
+  CompiledAffine2D ->
+  Domain2D ->
+  (Domain2D -> (Ix2 -> repr ()) -> repr ()) ->
+  (Ix2 -> repr ()) ->
+  repr ()
+applyCompiledAffine2D CompiledIdentity2D domain k emit =
+  k domain emit
+applyCompiledAffine2D CompiledInterchange2D domain k emit =
+  case domain of
+    RectDomain rect ->
+      k
+        (RectDomain (transposeRect2 rect))
+        (\ix -> emit (applyAffine2 interchange2D ix))
+    SkewDomain _ _ ->
+      applyAffineDomain2DRepr interchange2D domain k emit
+applyCompiledAffine2D (CompiledSkew2D factor) domain k emit =
+  k
+    (skewDomain2D factor domain)
+    (\ix -> emit (applyAffine2 (Affine2 1 0 (-factor) 1 0 0) ix))
+applyCompiledAffine2D (CompiledGenericAffine2D affine) domain k emit =
+  applyAffineDomain2DRepr affine domain k emit
 
 {-# INLINE boundingBoxAffine2D #-}
 boundingBoxAffine2D :: Affine2 -> Rect2 -> Rect2
@@ -1179,6 +1280,15 @@ classifyAffine2 (Affine2 1 0 0 1 0 0) = StructuredIdentity
 classifyAffine2 (Affine2 0 1 1 0 0 0) = StructuredInterchange
 classifyAffine2 (Affine2 1 0 factor 1 0 0) = StructuredSkew factor
 classifyAffine2 _ = StructuredGeneric
+
+{-# INLINE compileAffine2D #-}
+compileAffine2D :: Affine2 -> CompiledAffine2D
+compileAffine2D affine =
+  case classifyAffine2 affine of
+    StructuredIdentity -> CompiledIdentity2D
+    StructuredInterchange -> CompiledInterchange2D
+    StructuredSkew factor -> CompiledSkew2D factor
+    StructuredGeneric -> CompiledGenericAffine2D affine
 
 {-# INLINE domainRect2 #-}
 domainRect2 :: Domain2D -> Rect2

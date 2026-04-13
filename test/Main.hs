@@ -40,6 +40,9 @@ main = do
   testTiledRect2D
   testTransform2DIdentity
   testTransform2DTile
+  testTransform2DAffineCompose
+  testTransform2DGenericAffineTile
+  testTransform2DRepeatedTile
   testTransform2DSkewTile
   testTransform2DSkewCompose
   testTransform2DSkewInterchange
@@ -308,6 +311,33 @@ testTransform2DTile :: IO ()
 testTransform2DTile = do
   xs <- runTransformFill (tileTransform2D 2 3)
   assertEqual "transform 2d tile" expectedAffineFill xs
+
+testTransform2DAffineCompose :: IO ()
+testTransform2DAffineCompose = do
+  let transform =
+        composeTransform2D
+          (affineTransform2D interchange2D)
+          (affineTransform2D (skew2D 1))
+  xs <- runTransformFill transform
+  assertEqual "transform 2d affine+affine" expectedAffineFill xs
+
+testTransform2DGenericAffineTile :: IO ()
+testTransform2DGenericAffineTile = do
+  let transform =
+        composeTransform2D
+          (affineTransform2D (affine2 1 0 0 1 1 2))
+          (tileTransform2D 2 3)
+  xs <- runTransformFill transform
+  assertEqual "transform 2d generic affine+tile" expectedAffineFill xs
+
+testTransform2DRepeatedTile :: IO ()
+testTransform2DRepeatedTile = do
+  let transform =
+        composeTransform2D
+          (tileTransform2D 2 3)
+          (tileTransform2D 1 2)
+  xs <- runTransformFill transform
+  assertEqual "transform 2d repeated tile" expectedAffineFill xs
 
 testTransform2DSkewTile :: IO ()
 testTransform2DSkewTile = do
