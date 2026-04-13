@@ -1,0 +1,25 @@
+module Loom
+  ( Arr
+  , Prog
+  , Reducer
+  , RedVar
+  , newArr
+  , fromList
+  , toList
+  , sizeOfArr
+  , readArrIO
+  , writeArrIO
+  , runProg
+  , parFor
+  , readArr
+  , writeArr
+  , newReducer
+  , reduce
+  , getReducer
+  , foldFor
+  , mkReducer
+  , intSum
+  , doubleSum
+  ) where
+
+import Loom.Internal.Kernel
