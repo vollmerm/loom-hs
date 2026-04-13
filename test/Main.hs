@@ -5,6 +5,11 @@ module Main (main) where
 import Control.Exception (SomeException, try)
 import Control.Monad (unless)
 import Loom
+import Loom.Benchmark.Kernels
+  ( runRedBlackStencilExample
+  , runSeparableBlurExample
+  , runThreePhaseNormalizeExample
+  )
 
 main :: IO ()
 main = do
@@ -18,11 +23,19 @@ main = do
   testAccumulatorPhases
   testBarrierRejectedInLoop
   testMatrixMultiply
+  testRedBlackStencilBenchmark
+  testThreePhaseNormalizeBenchmark
+  testSeparableBlurBenchmark
   testAffineLoopIdentity
   testAffineLoopInterchange
   testAffineLoopSkew
   testAffineLoopComposition
   testAffineLoopRejectsSingularTransform
+  testTiledRect2D
+  testTransform2DIdentity
+  testTransform2DTile
+  testTransform2DSkewTile
+  testTransform2DRejectsSingularAffine
   testTiledFor2D
   testTiledMatrixMultiply
   putStrLn "All loom-hs tests passed."
@@ -147,6 +160,26 @@ testMatrixMultiply = do
   xs <- toList c
   assertEqual "matrix multiply" [58, 64, 139, 154] xs
 
+testRedBlackStencilBenchmark :: IO ()
+testRedBlackStencilBenchmark = do
+  let n = 4
+      input = [1 .. n * n]
+  xs <- runRedBlackStencilExample n input
+  assertEqual "red-black stencil benchmark" (expectedRedBlackStencil n input) xs
+
+testThreePhaseNormalizeBenchmark :: IO ()
+testThreePhaseNormalizeBenchmark = do
+  let input = [1.0, 2.0, 3.0, 4.0]
+  xs <- runThreePhaseNormalizeExample input
+  assertApproxList "three-phase normalize benchmark" 1e-12 (expectedNormalized input) xs
+
+testSeparableBlurBenchmark :: IO ()
+testSeparableBlurBenchmark = do
+  let n = 3
+      input = [1 .. n * n]
+  xs <- runSeparableBlurExample n input
+  assertEqual "separable blur benchmark" (expectedSeparableBlur n input) xs
+
 testAffineLoopIdentity :: IO ()
 testAffineLoopIdentity = do
   xs <- runAffineFill identityAffine2
@@ -181,6 +214,64 @@ testAffineLoopRejectsSingularTransform = do
   case result of
     Left _ -> pure ()
     Right _ -> error "singular affine transform should fail"
+
+testTiledRect2D :: IO ()
+testTiledRect2D = do
+  let rows = 4
+      cols = 5
+      shape = sh2 rows cols
+      rect = rect2 1 1 4 5
+  arr <- fromList (replicate (rows * cols) (0 :: Int))
+  runProg $
+    parallel $
+      tiledForRect2D 2 3 rect $ \ix ->
+        withIx2 ix $ \i j ->
+          writeArr arr (index2 shape ix) (i * 10 + j)
+  xs <- toList arr
+  assertEqual
+    "tiled rect 2d"
+    [ if i >= 1 && j >= 1
+        then i * 10 + j
+        else 0
+    | i <- [0 .. rows - 1]
+    , j <- [0 .. cols - 1]
+    ]
+    xs
+
+testTransform2DIdentity :: IO ()
+testTransform2DIdentity = do
+  xs <- runTransformFill identityTransform2D
+  assertEqual "transform 2d identity" expectedAffineFill xs
+
+testTransform2DTile :: IO ()
+testTransform2DTile = do
+  xs <- runTransformFill (tileTransform2D 2 3)
+  assertEqual "transform 2d tile" expectedAffineFill xs
+
+testTransform2DSkewTile :: IO ()
+testTransform2DSkewTile = do
+  let transform =
+        composeTransform2D
+          (skewTransform2D 1)
+          (tileTransform2D 2 3)
+  xs <- runTransformFill transform
+  assertEqual "transform 2d skew+tile" expectedAffineFill xs
+
+testTransform2DRejectsSingularAffine :: IO ()
+testTransform2DRejectsSingularAffine = do
+  result <-
+    ( try $
+        runProg $
+          parallel $
+            parForTransform2D
+              (affineTransform2D (affine2 1 0 0 0 0 0))
+              (sh2 2 2)
+              (\_ -> pure ())
+    ) ::
+      IO (Either SomeException ())
+  case result of
+    Left _ -> pure ()
+    Right _ -> error "singular transform stage should fail"
 
 testTiledFor2D :: IO ()
 testTiledFor2D = do
@@ -229,12 +320,105 @@ runAffineFill transform = do
           writeArr arr (index2 shape ix) (i * 10 + j)
   toList arr
 
+runTransformFill :: Transform2D -> IO [Int]
+runTransformFill transform = do
+  let rows = 3
+      cols = 5
+      shape = sh2 rows cols
+  arr <- newArr (rows * cols)
+  runProg $
+    parallel $
+      parForTransform2D transform shape $ \ix ->
+        withIx2 ix $ \i j ->
+          writeArr arr (index2 shape ix) (i * 10 + j)
+  toList arr
+
 expectedAffineFill :: [Int]
 expectedAffineFill = [i * 10 + j | i <- [0 .. 2], j <- [0 .. 4]]
+
+expectedRedBlackStencil :: Int -> [Int] -> [Int]
+expectedRedBlackStencil n input = blackPhase
+  where
+    redPhase =
+      [ if isInteriorCell n i j && even (i + j)
+          then stencilValue input i j
+          else input !! idx
+      | i <- [0 .. n - 1]
+      , j <- [0 .. n - 1]
+      , let idx = i * n + j
+      ]
+    blackPhase =
+      [ if isInteriorCell n i j && odd (i + j)
+          then stencilValue redPhase i j
+          else redPhase !! idx
+      | i <- [0 .. n - 1]
+      , j <- [0 .. n - 1]
+      , let idx = i * n + j
+      ]
+    stencilValue xs i j =
+      ( xs !! (i * n + j)
+          + xs !! ((i - 1) * n + j)
+          + xs !! ((i + 1) * n + j)
+          + xs !! (i * n + (j - 1))
+          + xs !! (i * n + (j + 1))
+      )
+        `quot` 5
+
+expectedNormalized :: [Double] -> [Double]
+expectedNormalized xs = map (\x -> (x - mean) * invStd) xs
+  where
+    n = fromIntegral (length xs)
+    mean = sum xs / n
+    variance = sum [delta * delta | x <- xs, let delta = x - mean] / n
+    invStd
+      | variance <= 0 = 0
+      | otherwise = 1 / sqrt variance
+
+expectedSeparableBlur :: Int -> [Int] -> [Int]
+expectedSeparableBlur n input =
+  [ ( horizontal !! (clampCell n (i - 1) * n + j)
+        + horizontal !! (i * n + j)
+        + horizontal !! (clampCell n (i + 1) * n + j)
+    )
+      `quot` 3
+  | i <- [0 .. n - 1]
+  , j <- [0 .. n - 1]
+  ]
+  where
+    horizontal =
+      [ ( input !! (i * n + clampCell n (j - 1))
+            + input !! (i * n + j)
+            + input !! (i * n + clampCell n (j + 1))
+        )
+          `quot` 3
+      | i <- [0 .. n - 1]
+      , j <- [0 .. n - 1]
+      ]
+
+isInteriorCell :: Int -> Int -> Int -> Bool
+isInteriorCell n i j = i > 0 && i + 1 < n && j > 0 && j + 1 < n
+
+clampCell :: Int -> Int -> Int
+clampCell n i
+  | i < 0 = 0
+  | i >= n = n - 1
+  | otherwise = i
 
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual label expected actual =
   unless (expected == actual) $
+    error
+      ( label
+          <> " failed: expected "
+          <> show expected
+          <> ", got "
+          <> show actual
+      )
+
+assertApproxList :: String -> Double -> [Double] -> [Double] -> IO ()
+assertApproxList label tolerance expected actual = do
+  assertEqual (label <> " length") (length expected) (length actual)
+  unless (and (zipWith (\x y -> abs (x - y) <= tolerance) expected actual)) $
     error
       ( label
           <> " failed: expected "

@@ -6,6 +6,7 @@ module Loom
   , Sh2
   , Rect2
   , Affine2
+  , Transform2D
   , Prog
   , Reducer
   , RedVar
@@ -32,6 +33,12 @@ module Loom
   , interchange2D
   , skew2D
   , boundingBoxAffine2D
+  , identityTransform2D
+  , affineTransform2D
+  , tileTransform2D
+  , composeTransform2D
+  , interchangeTransform2D
+  , skewTransform2D
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -45,6 +52,9 @@ module Loom
   , parForRect2D
   , parForAffineRect2D
   , parForAffine2D
+  , tileRect2D
+  , tiledForRect2D
+  , parForTransform2D
   , tile2D
   , parForTile2D
   , tiledFor2D

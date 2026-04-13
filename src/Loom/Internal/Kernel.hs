@@ -11,6 +11,7 @@ module Loom.Internal.Kernel
   , Sh2
   , Rect2
   , Affine2
+  , Transform2D
   , Prog
   , Reducer
   , RedVar
@@ -37,6 +38,12 @@ module Loom.Internal.Kernel
   , interchange2D
   , skew2D
   , boundingBoxAffine2D
+  , identityTransform2D
+  , affineTransform2D
+  , tileTransform2D
+  , composeTransform2D
+  , interchangeTransform2D
+  , skewTransform2D
   , sizeOfArr
   , readArrIO
   , writeArrIO
@@ -50,6 +57,9 @@ module Loom.Internal.Kernel
   , parForRect2D
   , parForAffineRect2D
   , parForAffine2D
+  , tileRect2D
+  , tiledForRect2D
+  , parForTransform2D
   , tile2D
   , parForTile2D
   , tiledFor2D
@@ -130,6 +140,16 @@ data Affine2 =
     {-# UNPACK #-} !Int
     {-# UNPACK #-} !Int
     {-# UNPACK #-} !Int
+
+newtype Transform2D = Transform2D
+  { applyTransform2D ::
+      forall repr.
+      Loop repr =>
+      Rect2 ->
+      (Rect2 -> (Ix2 -> repr ()) -> repr ()) ->
+      (Ix2 -> repr ()) ->
+      repr ()
+  }
 
 data ReducerSpec rep a = ReducerSpec
   { reducerInit :: !rep
@@ -530,13 +550,43 @@ invertAffine2 (Affine2 a00 a01 a10 a11 b0 b1) =
 identityAffine2 :: Affine2
 identityAffine2 = Affine2 1 0 0 1 0 0
 
+{-# INLINE identityTransform2D #-}
+identityTransform2D :: Transform2D
+identityTransform2D = Transform2D (\rect k emit -> k rect emit)
+
+{-# INLINE affineTransform2D #-}
+affineTransform2D :: Affine2 -> Transform2D
+affineTransform2D affine =
+  Transform2D $ \rect k emit ->
+    applyAffineRect2DRepr affine rect k emit
+
+{-# INLINE tileTransform2D #-}
+tileTransform2D :: Int -> Int -> Transform2D
+tileTransform2D tileRows tileCols =
+  Transform2D $ \rect k emit ->
+    tileRect2DRepr tileRows tileCols rect (\tileRect -> k tileRect emit)
+
+{-# INLINE composeTransform2D #-}
+composeTransform2D :: Transform2D -> Transform2D -> Transform2D
+composeTransform2D left right =
+  Transform2D $ \rect k emit ->
+    applyTransform2D left rect (\rect' emit' -> applyTransform2D right rect' k emit') emit
+
 {-# INLINE interchange2D #-}
 interchange2D :: Affine2
 interchange2D = Affine2 0 1 1 0 0 0
 
+{-# INLINE interchangeTransform2D #-}
+interchangeTransform2D :: Transform2D
+interchangeTransform2D = affineTransform2D interchange2D
+
 {-# INLINE skew2D #-}
 skew2D :: Int -> Affine2
 skew2D factor = Affine2 1 0 factor 1 0 0
+
+{-# INLINE skewTransform2D #-}
+skewTransform2D :: Int -> Transform2D
+skewTransform2D = affineTransform2D . skew2D
 
 {-# INLINE boundingBoxAffine2D #-}
 boundingBoxAffine2D :: Affine2 -> Rect2 -> Rect2
@@ -593,42 +643,52 @@ parFor2 = loopParForSh2
 {-# INLINE parForRect2D #-}
 parForRect2D :: Rect2 -> (Ix2 -> Prog ()) -> Prog ()
 parForRect2D (Rect2 rowLo colLo rowHi colHi) body =
-  case rowLo of
-    I# rowLo# ->
-      case colLo of
-        I# colLo# ->
-          case rowHi - rowLo of
-            I# rowCount# ->
-              case colHi - colLo of
-                I# colCount# ->
-                  Prog $ \k -> do
-                    loopParFor2#
-                      rowCount#
-                      colCount#
-                      (\i# j# ->
-                         unProg
-                           (body (Ix2 (I# (rowLo# +# i#)) (I# (colLo# +# j#))))
-                           (\() -> pure ()))
-                    k ()
+  Prog $ \k -> do
+    parForRect2DRepr rect (\ix -> unProg (body ix) (\() -> pure ()))
+    k ()
+  where
+    rect = Rect2 rowLo colLo rowHi colHi
 
 {-# INLINE parForAffineRect2D #-}
 parForAffineRect2D :: Affine2 -> Rect2 -> (Ix2 -> Prog ()) -> Prog ()
 parForAffineRect2D affine rect body =
-  case invertAffine2 affine of
-    Nothing ->
-      invalidProgUsage "parForAffineRect2D requires an invertible integer transform"
-    Just inverse ->
-      let !box = boundingBoxAffine2D affine rect
-       in parForRect2D box $ \ix' ->
-            let !ix = applyAffine2 inverse ix'
-             in case inRect2 rect ix of
-                  True -> body ix
-                  False -> pure ()
+  Prog $ \k -> do
+    applyAffineRect2DRepr
+      affine
+      rect
+      parForRect2DRepr
+      (\ix -> unProg (body ix) (\() -> pure ()))
+    k ()
 
 {-# INLINE parForAffine2D #-}
 parForAffine2D :: Affine2 -> Sh2 -> (Ix2 -> Prog ()) -> Prog ()
 parForAffine2D affine shape =
   parForAffineRect2D affine (rectOfShape2 shape)
+
+{-# INLINE tileRect2D #-}
+tileRect2D :: Int -> Int -> Rect2 -> (Rect2 -> Prog ()) -> Prog ()
+tileRect2D tileRows tileCols (Rect2 rowLo colLo rowHi colHi) body =
+  Prog $ \k -> do
+    tileRect2DRepr tileRows tileCols rect (\tileRect -> unProg (body tileRect) (\() -> pure ()))
+    k ()
+  where
+    rect = Rect2 rowLo colLo rowHi colHi
+
+{-# INLINE tiledForRect2D #-}
+tiledForRect2D :: Int -> Int -> Rect2 -> (Ix2 -> Prog ()) -> Prog ()
+tiledForRect2D tileRows tileCols rect body =
+  tileRect2D tileRows tileCols rect $ \tileRect ->
+    parForRect2D tileRect body
+
+{-# INLINE parForTransform2D #-}
+parForTransform2D :: Transform2D -> Sh2 -> (Ix2 -> Prog ()) -> Prog ()
+parForTransform2D transform shape body =
+  Prog $ \k -> do
+    applyTransform2D transform
+      (rectOfShape2 shape)
+      parForRect2DRepr
+      (\ix -> unProg (body ix) (\() -> pure ()))
+    k ()
 
 {-# INLINE tile2D #-}
 tile2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
@@ -879,6 +939,10 @@ combineSharedReducer vars workers spec = do
 invalidUsage :: String -> IO a
 invalidUsage = throwIO . userError
 
+{-# INLINE invalidUsageRepr #-}
+invalidUsageRepr :: String -> repr a
+invalidUsageRepr = error
+
 invalidProgUsage :: String -> Prog a
 invalidProgUsage msg = Prog $ \_ -> error msg
 
@@ -910,3 +974,92 @@ isEmptyRect2 (Rect2 rowLo colLo rowHi colHi) =
 inRect2 :: Rect2 -> Ix2 -> Bool
 inRect2 (Rect2 rowLo colLo rowHi colHi) (Ix2 row col) =
   row >= rowLo && row < rowHi && col >= colLo && col < colHi
+
+{-# INLINE parForRect2DRepr #-}
+parForRect2DRepr ::
+  Loop repr =>
+  Rect2 ->
+  (Ix2 -> repr ()) ->
+  repr ()
+parForRect2DRepr (Rect2 rowLo colLo rowHi colHi) body =
+  case rowLo of
+    I# rowLo# ->
+      case colLo of
+        I# colLo# ->
+          case rowHi - rowLo of
+            I# rowCount# ->
+              case colHi - colLo of
+                I# colCount# ->
+                    loopParFor2#
+                      rowCount#
+                      colCount#
+                      (\i# j# -> body (Ix2 (I# (rowLo# +# i#)) (I# (colLo# +# j#))))
+
+{-# INLINE applyAffineRect2DRepr #-}
+applyAffineRect2DRepr ::
+  Loop repr =>
+  Affine2 ->
+  Rect2 ->
+  (Rect2 -> (Ix2 -> repr ()) -> repr ()) ->
+  (Ix2 -> repr ()) ->
+  repr ()
+applyAffineRect2DRepr affine rect k emit =
+  case invertAffine2 affine of
+    Nothing ->
+      invalidUsageRepr "affine loop transformations require an invertible integer transform"
+    Just inverse ->
+      let !box = boundingBoxAffine2D affine rect
+          emit' ix' =
+            let !ix = applyAffine2 inverse ix'
+             in case inRect2 rect ix of
+                  True -> emit ix
+                  False -> pure ()
+       in k box emit'
+
+{-# INLINE tileRect2DRepr #-}
+tileRect2DRepr ::
+  Loop repr =>
+  Int ->
+  Int ->
+  Rect2 ->
+  (Rect2 -> repr ()) ->
+  repr ()
+tileRect2DRepr tileRows tileCols (Rect2 rowLo colLo rowHi colHi) body =
+  case tileRows of
+    I# tileRows# ->
+      case tileCols of
+        I# tileCols# ->
+          case rowLo of
+            I# rowLo# ->
+              case colLo of
+                I# colLo# ->
+                  case rowHi - rowLo of
+                    I# rows# ->
+                      case colHi - colLo of
+                        I# cols# ->
+                          case tileRows# <=# 0# of
+                            1# -> invalidUsageRepr "tileRect2D requires a positive row tile size"
+                            _ ->
+                              case tileCols# <=# 0# of
+                                1# -> invalidUsageRepr "tileRect2D requires a positive column tile size"
+                                _ ->
+                                  case rows# <=# 0# of
+                                    1# -> pure ()
+                                    _ ->
+                                      case cols# <=# 0# of
+                                        1# -> pure ()
+                                        _ ->
+                                          loopParFor2#
+                                            (tileCount# rows# tileRows#)
+                                            (tileCount# cols# tileCols#)
+                                            (\tileI# tileJ# ->
+                                               let !row0# = rowLo# +# (tileI# *# tileRows#)
+                                                   !col0# = colLo# +# (tileJ# *# tileCols#)
+                                                   !rowCount# = tileSpan# rows# (tileI# *# tileRows#) tileRows#
+                                                   !colCount# = tileSpan# cols# (tileJ# *# tileCols#) tileCols#
+                                                in body
+                                                     (Rect2
+                                                        (I# row0#)
+                                                        (I# col0#)
+                                                        (I# (row0# +# rowCount#))
+                                                        (I# (col0# +# colCount#))))
