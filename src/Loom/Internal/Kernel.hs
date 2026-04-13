@@ -80,9 +80,10 @@ module Loom.Internal.Kernel
   ) where
 
 import Control.Concurrent (MVar, forkIOWithUnmask, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, throwIO, try)
+import Control.Exception (SomeException, bracket, throwIO, try)
 import Control.Monad (ap)
 import Control.Monad.ST (RealWorld)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Primitive.Array
   ( MutableArray
   , newArray
@@ -177,6 +178,28 @@ data RedVar a where
 data AccVar a where
   AccVar :: Prim a => !(PrimVar RealWorld a) -> AccVar a
 
+data WorkerHandle = WorkerHandle
+  { workerCommand :: !(MVar WorkerCommand)
+  , workerResult :: !(MVar (Either SomeException ()))
+  }
+
+data WorkerCommand
+  = RunPhase !Phase
+  | StopWorker
+
+data Phase = Phase
+  { phaseEnd :: !Int
+  , phaseChunkSize :: !Int
+  , phaseNextIndex :: !(IORef Int)
+  , phaseFailure :: !(IORef (Maybe SomeException))
+  , phaseRunChunk :: !(Int -> Int -> Int -> IO ())
+  }
+
+data Team = Team
+  { teamWorkerCount :: !Int
+  , teamWorkers :: ![WorkerHandle]
+  }
+
 class Monad repr => Loop repr where
   loopParallel :: repr a -> repr a
   loopBarrier :: repr ()
@@ -208,7 +231,7 @@ instance Monad Prog where
   Prog m >>= f = Prog $ \k -> m (\a -> unProg (f a) k)
 
 data Runtime = Runtime
-  { rtParallelWorkers :: !(Maybe Int)
+  { rtTeam :: !(Maybe Team)
   , rtWorkerId :: !(Maybe Int)
   , rtLoopDepth :: !Int
   }
@@ -231,16 +254,17 @@ instance Monad Kernel where
 
 instance Loop Kernel where
   loopParallel body = Kernel $ \rt ->
-    case (rtParallelWorkers rt, rtWorkerId rt, rtLoopDepth rt) of
+    case (rtTeam rt, rtWorkerId rt, rtLoopDepth rt) of
       (Nothing, Nothing, 0) -> do
         caps <- getNumCapabilities
         let !workers = max 1 caps
-        runKernel body (Runtime (Just workers) Nothing 0)
+        withParallelTeam workers $ \team ->
+          runKernel body (Runtime (Just team) Nothing 0)
       _ ->
         invalidUsage "parallel regions cannot be nested or entered from inside a loop body"
 
   loopBarrier = Kernel $ \rt ->
-    case (rtParallelWorkers rt, rtWorkerId rt, rtLoopDepth rt) of
+    case (rtTeam rt, rtWorkerId rt, rtLoopDepth rt) of
       (Nothing, _, _) ->
         invalidUsage "barrier may only be used inside a parallel region"
       (_, Just _, _) ->
@@ -252,19 +276,24 @@ instance Loop Kernel where
         pure ()
 
   loopParFor n body = Kernel $ \rt -> do
-    workers0 <-
-      case rtParallelWorkers rt of
-        Just workers -> pure workers
-        Nothing -> getNumCapabilities
-    let !workers = min n (max 1 workers0)
-        childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
-        canRunParallel =
+    let childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
+        canRunParallel !workers =
           rtLoopDepth rt == 0
             && rtWorkerId rt == Nothing
             && workers > 1
-    if canRunParallel
-      then runParallel workers childRt
-      else runSequential childRt 0
+    case rtTeam rt of
+      Just team ->
+        if canRunParallel (teamWorkerCount team)
+          then runParallel team childRt
+          else runSequential childRt 0
+      Nothing -> do
+        caps <- getNumCapabilities
+        let !workers = min n (max 1 caps)
+        if canRunParallel workers
+          then
+            withParallelTeam workers $ \team ->
+              runParallel team ((childRt {rtTeam = Just team}))
+          else runSequential childRt 0
     where
       runSequential !childRt = goSeq
         where
@@ -272,19 +301,10 @@ instance Loop Kernel where
             | i >= n = pure ()
             | otherwise = runKernel (body i) childRt >> goSeq (i + 1)
 
-      runParallel !workers !childRt = do
-        let chunks = chunkRanges workers n
-        vars <- mapM (forkChunk childRt) (zip [0 ..] chunks)
-        mapM_ awaitChunkResult vars
-
-      forkChunk !childRt (!workerId, (!start, !end)) = do
-        var <- newEmptyMVar
-        _ <-
-          forkIOWithUnmask $ \unmask -> do
-            let workerRt = childRt {rtWorkerId = Just workerId}
-            result <- try (unmask (runChunk workerRt start end)) :: IO (Either SomeException ())
-            putMVar var result
-        pure var
+      runParallel !team !childRt =
+        runParallelPhase team n (chunkSizeFor (teamWorkerCount team) n) $ \workerId start end ->
+          let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
+           in runChunk workerRt start end
 
       runChunk !workerRt !start !end = goChunk start
         where
@@ -301,19 +321,24 @@ instance Loop Kernel where
           _ -> do
             let !total# = n# *# m#
                 !total = I# total#
-            workers0 <-
-              case rtParallelWorkers rt of
-                Just workers -> pure workers
-                Nothing -> getNumCapabilities
-            let !workers = min total (max 1 workers0)
                 childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
-                canRunParallel =
+                canRunParallel !workers =
                   rtLoopDepth rt == 0
                     && rtWorkerId rt == Nothing
                     && workers > 1
-            if canRunParallel
-              then runParallel2 total workers childRt
-              else runSequential2 childRt 0 total
+            case rtTeam rt of
+              Just team ->
+                if canRunParallel (teamWorkerCount team)
+                  then runParallel2 total team childRt
+                  else runSequential2 childRt 0 total
+              Nothing -> do
+                caps <- getNumCapabilities
+                let !workers = min total (max 1 caps)
+                if canRunParallel workers
+                  then
+                    withParallelTeam workers $ \team ->
+                      runParallel2 total team (childRt {rtTeam = Just team})
+                  else runSequential2 childRt 0 total
     where
       runSequential2 !childRt !start !end =
         case start of
@@ -338,19 +363,10 @@ instance Loop Kernel where
               1# -> go2 childRt idx'# end# i# j'#
               _ -> go2 childRt idx'# end# (i# +# 1#) 0#
 
-      runParallel2 !total !workers !childRt = do
-        let chunks = chunkRanges workers total
-        vars <- mapM (forkChunk2 childRt) (zip [0 ..] chunks)
-        mapM_ awaitChunkResult vars
-
-      forkChunk2 !childRt (!workerId, (!start, !end)) = do
-        var <- newEmptyMVar
-        _ <-
-          forkIOWithUnmask $ \unmask -> do
-            let workerRt = childRt {rtWorkerId = Just workerId}
-            result <- try (unmask (runSequential2 workerRt start end)) :: IO (Either SomeException ())
-            putMVar var result
-        pure var
+      runParallel2 !total !team !childRt =
+        runParallelPhase team total (chunkSizeFor (teamWorkerCount team) total) $ \workerId start end ->
+          let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
+           in runSequential2 workerRt start end
 
   loopReadArr (Arr _ arr) i = Kernel (\_ -> readPrimArray arr i)
 
@@ -883,14 +899,14 @@ tileSpan# len# start# tile# =
 
 shouldShareReducer :: Runtime -> Bool
 shouldShareReducer rt =
-  case (rtParallelWorkers rt, rtWorkerId rt, rtLoopDepth rt) of
+  case (rtTeam rt, rtWorkerId rt, rtLoopDepth rt) of
     (Just _, Nothing, 0) -> True
     _ -> False
 
 parallelWorkers :: Runtime -> Int
 parallelWorkers rt =
-  case rtParallelWorkers rt of
-    Just workers -> workers
+  case rtTeam rt of
+    Just team -> teamWorkerCount team
     Nothing -> 1
 
 reducerSlot :: Runtime -> Int
@@ -946,20 +962,98 @@ invalidUsageRepr = error
 invalidProgUsage :: String -> Prog a
 invalidProgUsage msg = Prog $ \_ -> error msg
 
-awaitChunkResult :: MVar (Either SomeException ()) -> IO ()
-awaitChunkResult var = do
-  result <- takeMVar var
-  either throwIO pure result
+withParallelTeam :: Int -> (Team -> IO a) -> IO a
+withParallelTeam workers = bracket (newParallelTeam workers) stopParallelTeam
 
-chunkRanges :: Int -> Int -> [(Int, Int)]
-chunkRanges !workers !n = go 0
+newParallelTeam :: Int -> IO Team
+newParallelTeam workers = do
+  let !count = max 1 workers
+  handles <- mapM startWorker [1 .. count - 1]
+  pure (Team count handles)
+
+stopParallelTeam :: Team -> IO ()
+stopParallelTeam (Team _ handles) = do
+  mapM_ (\handle -> putMVar (workerCommand handle) StopWorker) handles
+  mapM_ awaitWorkerResult handles
+
+startWorker :: Int -> IO WorkerHandle
+startWorker workerId = do
+  command <- newEmptyMVar
+  result <- newEmptyMVar
+  _ <-
+    forkIOWithUnmask $ \unmask ->
+      let go = do
+            cmd <- takeMVar command
+            case cmd of
+              StopWorker ->
+                putMVar result (Right ())
+              RunPhase phase -> do
+                outcome <- try (unmask (runPhaseWorker phase workerId)) :: IO (Either SomeException ())
+                putMVar result outcome
+                go
+       in go
+  pure (WorkerHandle command result)
+
+awaitWorkerResult :: WorkerHandle -> IO (Either SomeException ())
+awaitWorkerResult handle = takeMVar (workerResult handle)
+
+runParallelPhase :: Team -> Int -> Int -> (Int -> Int -> Int -> IO ()) -> IO ()
+runParallelPhase team end chunkSize runChunk = do
+  nextIndex <- newIORef 0
+  failure <- newIORef Nothing
+  let !phase =
+        Phase
+          { phaseEnd = end
+          , phaseChunkSize = max 1 chunkSize
+          , phaseNextIndex = nextIndex
+          , phaseFailure = failure
+          , phaseRunChunk = runChunk
+          }
+  mapM_ (\handle -> putMVar (workerCommand handle) (RunPhase phase)) (teamWorkers team)
+  runPhaseWorker phase 0
+  results <- mapM awaitWorkerResult (teamWorkers team)
+  firstFailure <- readIORef failure
+  case firstFailure of
+    Just ex -> throwIO ex
+    Nothing -> mapM_ (either throwIO pure) results
+
+runPhaseWorker :: Phase -> Int -> IO ()
+runPhaseWorker phase workerId = go
   where
-    !chunkSize = max 1 ((n + workers - 1) `quot` workers)
-    go !start
-      | start >= n = []
-      | otherwise =
-          let !end = min n (start + chunkSize)
-           in (start, end) : go end
+    go = do
+      failed <- readIORef (phaseFailure phase)
+      case failed of
+        Just _ -> pure ()
+        Nothing -> do
+          start <- claimPhaseChunk phase
+          if start >= phaseEnd phase
+            then pure ()
+            else do
+              let !end = min (phaseEnd phase) (start + phaseChunkSize phase)
+              result <- try (phaseRunChunk phase workerId start end) :: IO (Either SomeException ())
+              case result of
+                Right () -> go
+                Left ex -> recordPhaseFailure phase ex
+
+claimPhaseChunk :: Phase -> IO Int
+claimPhaseChunk phase =
+  atomicModifyIORef' (phaseNextIndex phase) $ \start ->
+    let !next = start + phaseChunkSize phase
+     in (next, start)
+
+recordPhaseFailure :: Phase -> SomeException -> IO ()
+recordPhaseFailure phase ex = do
+  atomicModifyIORef' (phaseFailure phase) $ \existing ->
+    case existing of
+      Just prior -> (Just prior, ())
+      Nothing -> (Just ex, ())
+  atomicModifyIORef' (phaseNextIndex phase) (\_ -> (phaseEnd phase, ()))
+
+chunkSizeFor :: Int -> Int -> Int
+chunkSizeFor workers total =
+  max 1 ((total + targetChunks - 1) `quot` targetChunks)
+  where
+    !targetChunks = max 1 (workers * 4)
 
 {-# INLINE rectOfShape2 #-}
 rectOfShape2 :: Sh2 -> Rect2

@@ -4,6 +4,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, try)
 import Control.Monad (unless)
+import GHC.Conc (getNumCapabilities)
 import Loom
 import Loom.Benchmark.Kernels
   ( runRedBlackStencilExample
@@ -20,6 +21,7 @@ main = do
   testReducerSum
   testAccumFor
   testParallelReducerScope
+  testDynamicChunkedReducerScope
   testAccumulatorPhases
   testBarrierRejectedInLoop
   testMatrixMultiply
@@ -107,6 +109,22 @@ testParallelReducerScope = do
           reduce sumVar (i + 1)
         getReducer sumVar
   assertEqual "parallel reducer scope" 110 total
+
+testDynamicChunkedReducerScope :: IO ()
+testDynamicChunkedReducerScope = do
+  caps <- getNumCapabilities
+  let n = max 33 (caps * 8 + 3)
+      expected = sum [i + (2 * i + 1) | i <- [0 .. n - 1]]
+  total <- runProg $
+    parallel $
+      newReducer intSum $ \sumVar -> do
+        parFor n $ \i ->
+          reduce sumVar i
+        barrier
+        parFor n $ \i ->
+          reduce sumVar (2 * i + 1)
+        getReducer sumVar
+  assertEqual "dynamic chunked reducer scope" expected total
 
 testAccumulatorPhases :: IO ()
 testAccumulatorPhases = do
