@@ -26,6 +26,8 @@ module Loom.Internal.Kernel
   , doubleSum
   ) where
 
+import Control.Concurrent (forkIOWithUnmask, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, try, throwIO)
 import Control.Monad (ap)
 import Control.Monad.ST (RealWorld)
 import Data.Primitive.PrimArray
@@ -41,6 +43,7 @@ import Data.Primitive.PrimVar
   , writePrimVar
   )
 import Data.Primitive.Types (Prim)
+import GHC.Conc (getNumCapabilities)
 
 data Arr a = Arr !Int !(MutablePrimArray RealWorld a)
 
@@ -80,53 +83,89 @@ instance Monad Prog where
   Prog m >>= f = Prog $ \k -> m (\a -> unProg (f a) k)
 
 newtype Kernel a = Kernel
-  { runKernel :: IO a
+  { runKernel :: Int -> IO a
   }
 
 instance Functor Kernel where
-  fmap f (Kernel action) = Kernel (fmap f action)
+  fmap f (Kernel action) = Kernel (\depth -> fmap f (action depth))
 
 instance Applicative Kernel where
-  pure = Kernel . pure
-  Kernel mf <*> Kernel mx = Kernel (mf <*> mx)
+  pure x = Kernel (\_ -> pure x)
+  Kernel mf <*> Kernel mx = Kernel (\depth -> mf depth <*> mx depth)
 
 instance Monad Kernel where
-  Kernel action >>= f = Kernel (action >>= runKernel . f)
+  Kernel action >>= f = Kernel $ \depth -> do
+    x <- action depth
+    runKernel (f x) depth
 
 instance Loop Kernel where
-  loopParFor n body = Kernel (go 0)
+  loopParFor n body = Kernel go
     where
-      go !i
-        | i >= n = pure ()
-        | otherwise = runKernel (body i) >> go (i + 1)
+      go !depth = do
+        caps <- getNumCapabilities
+        let workers = min caps n
+            childDepth = depth + 1
+        if depth == 0 && workers > 1
+          then runParallel childDepth workers
+          else runSequential childDepth 0
 
-  loopReadArr (Arr _ arr) i = Kernel (readPrimArray arr i)
+      runSequential !childDepth = goSeq
+        where
+          goSeq !i
+            | i >= n = pure ()
+            | otherwise = runKernel (body i) childDepth >> goSeq (i + 1)
 
-  loopWriteArr (Arr _ arr) i x = Kernel (writePrimArray arr i x)
+      runParallel !childDepth !workers = do
+        let chunks = chunkRanges workers n
+        vars <- mapM (forkChunk childDepth) chunks
+        mapM_ awaitChunk vars
+
+      forkChunk !childDepth (!start, !end) = do
+        var <- newEmptyMVar
+        _ <-
+          forkIOWithUnmask $ \unmask -> do
+            result <- try (unmask (runChunk childDepth start end)) :: IO (Either SomeException ())
+            putMVar var result
+        pure var
+
+      runChunk !childDepth !start !end = goChunk start
+        where
+          goChunk !i
+            | i >= end = pure ()
+            | otherwise = runKernel (body i) childDepth >> goChunk (i + 1)
+
+      awaitChunk var = do
+        result <- takeMVar var
+        either throwIO pure result
+
+  loopReadArr (Arr _ arr) i = Kernel (\_ -> readPrimArray arr i)
+
+  loopWriteArr (Arr _ arr) i x = Kernel (\_ -> writePrimArray arr i x)
 
   loopNewReducer reducer body =
-    Kernel $ do
+    Kernel $ \depth -> do
       redVar <- newRedVar reducer
-      runKernel (body redVar)
+      runKernel (body redVar) depth
 
   loopReduce (RedVar var spec) x =
-    Kernel $ do
+    Kernel $ \_ -> do
       !acc <- readPrimVar var
       let !acc' = reducerStep spec acc x
       writePrimVar var acc'
 
-  loopGetReducer (RedVar var spec) = Kernel $ do
+  loopGetReducer (RedVar var spec) = Kernel $ \_ -> do
     !acc <- readPrimVar var
     pure (reducerDone spec acc)
 
-  loopFoldFor (Reducer spec) n body = Kernel (go 0 (reducerInit spec))
+  loopFoldFor (Reducer spec) n body = Kernel $ \depth ->
+    go depth 0 (reducerInit spec)
     where
-      go !i !acc
+      go !depth !i !acc
         | i >= n = pure (reducerDone spec acc)
         | otherwise = do
-            x <- runKernel (body i)
+            x <- runKernel (body i) depth
             let !acc' = reducerStep spec acc x
-            go (i + 1) acc'
+            go depth (i + 1) acc'
 
 {-# INLINE newArr #-}
 newArr :: Prim a => Int -> IO (Arr a)
@@ -165,7 +204,7 @@ toList arr = go 0
 
 {-# INLINE runProg #-}
 runProg :: Prog a -> IO a
-runProg (Prog m) = runKernel (m pure)
+runProg (Prog m) = runKernel (m pure) 0
 
 {-# INLINE parFor #-}
 parFor :: Int -> (Int -> Prog ()) -> Prog ()
@@ -223,3 +262,13 @@ newRedVar :: Reducer a -> IO (RedVar a)
 newRedVar (Reducer spec) = do
   var <- newPrimVar (reducerInit spec)
   pure (RedVar var spec)
+
+chunkRanges :: Int -> Int -> [(Int, Int)]
+chunkRanges !workers !n = go 0
+  where
+    !chunkSize = max 1 ((n + workers - 1) `quot` workers)
+    go !start
+      | start >= n = []
+      | otherwise =
+          let !end = min n (start + chunkSize)
+           in (start, end) : go end
