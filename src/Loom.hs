@@ -30,6 +30,9 @@ module Loom
   , parForSh1
   , parForSh2
   , parFor2
+  , tile2D
+  , parForTile2D
+  , tiledFor2D
   , readArr
   , writeArr
   , newReducer

@@ -34,6 +34,9 @@ module Loom.Internal.Kernel
   , parForSh1
   , parForSh2
   , parFor2
+  , tile2D
+  , parForTile2D
+  , tiledFor2D
   , readArr
   , writeArr
   , newReducer
@@ -437,15 +440,43 @@ parForSh1 (Sh1 n) body = Prog $ \k -> do
 
 {-# INLINE parForSh2 #-}
 parForSh2 :: Sh2 -> (Ix2 -> Prog ()) -> Prog ()
-parForSh2 (Sh2 n m) body = Prog $ \k -> do
-  loopParFor2 n m (\i j -> unProg (body (Ix2 i j)) (\() -> pure ()))
-  k ()
+parForSh2 (Sh2 n m) body =
+  loopParForSh2 n m (\i j -> body (Ix2 i j))
 
 {-# INLINE parFor2 #-}
 parFor2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
-parFor2 n m body =
-  parForSh2 (Sh2 n m) $ \ix ->
-    withIx2 ix body
+parFor2 = loopParForSh2
+
+{-# INLINE tile2D #-}
+tile2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
+tile2D tileRows tileCols (Sh2 rows cols) body
+  | tileRows <= 0 = invalidProgUsage "tile2D requires a positive row tile size"
+  | tileCols <= 0 = invalidProgUsage "tile2D requires a positive column tile size"
+  | rows <= 0 || cols <= 0 = pure ()
+  | otherwise =
+      loopParForSh2 (tileCount rows tileRows) (tileCount cols tileCols) $ \tileI tileJ ->
+        body (tileI * tileRows) (tileJ * tileCols)
+
+{-# INLINE parForTile2D #-}
+parForTile2D :: Int -> Int -> Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
+parForTile2D tileRows tileCols row0 col0 (Sh2 rows cols) body
+  | tileRows <= 0 = invalidProgUsage "parForTile2D requires a positive row tile size"
+  | tileCols <= 0 = invalidProgUsage "parForTile2D requires a positive column tile size"
+  | row0 < 0 = invalidProgUsage "parForTile2D requires a non-negative row origin"
+  | col0 < 0 = invalidProgUsage "parForTile2D requires a non-negative column origin"
+  | rowCount <= 0 || colCount <= 0 = pure ()
+  | otherwise =
+      loopParForSh2 rowCount colCount $ \i j ->
+        body (row0 + i) (col0 + j)
+  where
+    rowCount = tileSpan rows row0 tileRows
+    colCount = tileSpan cols col0 tileCols
+
+{-# INLINE tiledFor2D #-}
+tiledFor2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
+tiledFor2D tileRows tileCols shape body =
+  tile2D tileRows tileCols shape $ \row0 col0 ->
+    parForTile2D tileRows tileCols row0 col0 shape body
 
 {-# INLINE readArr #-}
 readArr :: Prim a => Arr a -> Int -> Prog a
@@ -534,6 +565,21 @@ doubleSum = mkReducerWith 0 step merge id
     step !acc !x = acc + x
     merge !left !right = left + right
 
+{-# INLINE loopParForSh2 #-}
+loopParForSh2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
+loopParForSh2 rows cols body =
+  Prog $ \k -> do
+    loopParFor2 rows cols (\i j -> unProg (body i j) (\() -> pure ()))
+    k ()
+
+{-# INLINE tileCount #-}
+tileCount :: Int -> Int -> Int
+tileCount len tile = (len + tile - 1) `quot` tile
+
+{-# INLINE tileSpan #-}
+tileSpan :: Int -> Int -> Int -> Int
+tileSpan len start tile = min tile (len - start)
+
 shouldShareReducer :: Runtime -> Bool
 shouldShareReducer rt =
   case (rtParallelWorkers rt, rtWorkerId rt, rtLoopDepth rt) of
@@ -591,6 +637,9 @@ combineSharedReducer vars workers spec = do
 
 invalidUsage :: String -> IO a
 invalidUsage = throwIO . userError
+
+invalidProgUsage :: String -> Prog a
+invalidProgUsage msg = Prog $ \_ -> error msg
 
 awaitChunkResult :: MVar (Either SomeException ()) -> IO ()
 awaitChunkResult var = do

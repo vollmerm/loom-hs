@@ -17,6 +17,8 @@ main = do
   testAccumulatorPhases
   testBarrierRejectedInLoop
   testMatrixMultiply
+  testTiledFor2D
+  testTiledMatrixMultiply
   putStrLn "All loom-hs tests passed."
 
 testArrayUpdate :: IO ()
@@ -127,6 +129,40 @@ testMatrixMultiply = do
           writeArr c (index2 outShape outIx) total
   xs <- toList c
   assertEqual "matrix multiply" [58, 64, 139, 154] xs
+
+testTiledFor2D :: IO ()
+testTiledFor2D = do
+  let rows = 3
+      cols = 5
+      shape = sh2 rows cols
+  arr <- newArr (rows * cols)
+  runProg $
+    parallel $
+      tiledFor2D 2 3 shape $ \i j ->
+        writeArr arr (i * cols + j) (i * 10 + j)
+  xs <- toList arr
+  assertEqual "tiled for 2d" [i * 10 + j | i <- [0 .. rows - 1], j <- [0 .. cols - 1]] xs
+
+testTiledMatrixMultiply :: IO ()
+testTiledMatrixMultiply = do
+  let rowsA = 2
+      colsA = 3
+      colsB = 2
+      outShape = sh2 rowsA colsB
+  a <- fromList [1, 2, 3, 4, 5, 6 :: Int]
+  b <- fromList [7, 8, 9, 10, 11, 12 :: Int]
+  c <- newArr (rowsA * colsB)
+  runProg $
+    parallel $
+      tile2D 2 1 outShape $ \row0 col0 ->
+        parForTile2D 2 1 row0 col0 outShape $ \i j -> do
+          total <- accumFor colsA 0 $ \sumVar k -> do
+            lhs <- readArr a (i * colsA + k)
+            rhs <- readArr b (k * colsB + j)
+            pure (sumVar + lhs * rhs)
+          writeArr c (i * colsB + j) total
+  xs <- toList c
+  assertEqual "tiled matrix multiply" [58, 64, 139, 154] xs
 
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual label expected actual =
