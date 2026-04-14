@@ -62,10 +62,14 @@ library
     import:           warnings
 
     -- Modules exported by the library.
-    exposed-modules:  Loom
+    exposed-modules:
+        Loom
+        Loom.Polyhedral
 
     -- Modules included in this library but not exported.
-    other-modules:    Loom.Internal.Kernel
+    other-modules:
+        Loom.Internal.Kernel
+        Loom.Internal.Polyhedral
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:

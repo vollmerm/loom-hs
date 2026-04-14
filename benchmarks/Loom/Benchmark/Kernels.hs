@@ -6,6 +6,8 @@ module Loom.Benchmark.Kernels
   , benchmarks
   , lookupBenchmark
   , runMatMulExample
+  , runPolyhedralTiledMatMulExample
+  , runPolyhedralWavefrontEditDistanceExample
   , runWavefrontEditDistanceExample
   , runRedBlackStencilExample
   , runThreePhaseNormalizeExample
@@ -13,6 +15,7 @@ module Loom.Benchmark.Kernels
   ) where
 
 import Loom
+import qualified Loom.Polyhedral as Poly
 
 data Benchmark = forall env. Benchmark
   { benchmarkName :: String
@@ -192,6 +195,16 @@ runMatMulExample n xs ys = do
   runMatMulKernel n left right out
   toList out
 
+runPolyhedralTiledMatMulExample :: Int -> [Int] -> [Int] -> IO [Int]
+runPolyhedralTiledMatMulExample n xs ys = do
+  left <- fromList xs
+  right <- fromList ys
+  out <- newArr (n * n)
+  runProg $
+    parallel $
+      requirePolyhedral "polyhedral tiled matmul" (polyhedralTiledMatMulKernel n left right out)
+  toList out
+
 runWavefrontEditDistance :: EditDistanceEnv -> IO Int
 runWavefrontEditDistance env = do
   let rows = editRows env
@@ -245,6 +258,28 @@ runWavefrontEditDistanceExample xs ys = do
       tableCols = cols + 1
   dp <- newArr ((rows + 1) * tableCols)
   runWavefrontEditDistanceKernel rows cols left right dp
+  readArrIO dp (rows * tableCols + cols)
+
+runPolyhedralWavefrontEditDistanceExample :: [Int] -> [Int] -> IO Int
+runPolyhedralWavefrontEditDistanceExample xs ys = do
+  left <- fromList xs
+  right <- fromList ys
+  let rows = length xs
+      cols = length ys
+      tableCols = cols + 1
+  dp <- newArr ((rows + 1) * tableCols)
+  runProg $
+    parallel $ do
+      parFor (rows + 1) $ \i ->
+        writeArr dp (i * tableCols) i
+      barrier
+      parFor cols $ \j0 ->
+        let j = j0 + 1
+         in writeArr dp j j
+      barrier
+      requirePolyhedral
+        "polyhedral wavefront edit distance"
+        (polyhedralWavefrontKernel rows cols tableCols left right dp)
   readArrIO dp (rows * tableCols + cols)
 
 runSeparableBlurExample :: Int -> [Int] -> IO [Int]
@@ -420,6 +455,81 @@ clampIndex n i
   | i < 0 = 0
   | i >= n = n - 1
   | otherwise = i
+
+requirePolyhedral :: String -> Either Poly.PolyhedralError (Prog ()) -> Prog ()
+requirePolyhedral label compiled =
+  case compiled of
+    Left err -> error (label ++ ": " ++ show err)
+    Right prog -> prog
+
+rowMajorAccess :: Int -> Poly.AffineExpr -> Poly.AffineExpr -> Poly.AffineExpr
+rowMajorAccess stride row col =
+  Poly.plus (Poly.scaled stride row) col
+
+offsetAccess :: Poly.AffineExpr -> Int -> Poly.AffineExpr
+offsetAccess expr delta = Poly.plus expr (Poly.constant delta)
+
+polyhedralTiledMatMulKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> Either Poly.PolyhedralError (Prog ())
+polyhedralTiledMatMulKernel n left right out =
+  Poly.lowerKernel2D $
+    Poly.kernel2D
+      (sh2 n n)
+      [ Poly.phase2D
+          "tiled-matmul"
+          (Poly.tileSchedule2D tile tile)
+          Poly.IndependentDependence2D
+          [ Poly.readAccess2D "left" (rowMajorAccess n Poly.rowVar (Poly.auxVar "k"))
+          , Poly.readAccess2D "right" (rowMajorAccess n (Poly.auxVar "k") Poly.colVar)
+          ]
+          [Poly.writeAccess2D "out" (rowMajorAccess n Poly.rowVar Poly.colVar)]
+          (\i j -> writeMatMulScalarCell n left right out i j)
+      ]
+  where
+    tile = max 1 (min 32 n)
+
+polyhedralWavefrontKernel ::
+  Int ->
+  Int ->
+  Int ->
+  Arr Int ->
+  Arr Int ->
+  Arr Int ->
+  Either Poly.PolyhedralError (Prog ())
+polyhedralWavefrontKernel rows cols tableCols left right dp =
+  Poly.lowerKernel2D $
+    Poly.kernel2D
+      (sh2 rows cols)
+      [ Poly.phase2D
+          "edit-distance-wavefront"
+          Poly.wavefrontSchedule2D
+          Poly.WavefrontDependence2D
+          [ Poly.readAccess2D "dp" (offsetAccess (rowMajorAccess tableCols Poly.rowVar Poly.colVar) 1)
+          , Poly.readAccess2D "dp" (offsetAccess (rowMajorAccess tableCols Poly.rowVar Poly.colVar) tableCols)
+          , Poly.readAccess2D "dp" (rowMajorAccess tableCols Poly.rowVar Poly.colVar)
+          , Poly.readAccess2D "left" Poly.rowVar
+          , Poly.readAccess2D "right" Poly.colVar
+          ]
+          [Poly.writeAccess2D "dp" (offsetAccess (rowMajorAccess tableCols Poly.rowVar Poly.colVar) (tableCols + 1))]
+          (\i0 j0 -> do
+             let i = i0 + 1
+                 j = j0 + 1
+                 rowBase = i * tableCols
+                 prevRowBase = (i - 1) * tableCols
+             deletion <- readArr dp (prevRowBase + j)
+             insertion <- readArr dp (rowBase + (j - 1))
+             substitution <- readArr dp (prevRowBase + (j - 1))
+             x <- readArr left i0
+             y <- readArr right j0
+             let cost
+                   | x == y = 0
+                   | otherwise = 1
+                 !cell =
+                   min3
+                     (deletion + 1)
+                     (insertion + 1)
+                     (substitution + cost)
+             writeArr dp (rowBase + j) cell)
+      ]
 
 min3 :: Int -> Int -> Int -> Int
 min3 x y z = min x (min y z)

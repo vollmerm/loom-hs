@@ -6,8 +6,11 @@ import Control.Exception (SomeException, try)
 import Control.Monad (unless)
 import GHC.Conc (getNumCapabilities)
 import Loom
+import qualified Loom.Polyhedral as Poly
 import Loom.Benchmark.Kernels
   ( runMatMulExample
+  , runPolyhedralTiledMatMulExample
+  , runPolyhedralWavefrontEditDistanceExample
   , runRedBlackStencilExample
   , runSeparableBlurExample
   , runThreePhaseNormalizeExample
@@ -49,6 +52,15 @@ main = do
   testTransform2DRejectsSingularAffine
   testTiledFor2D
   testTiledMatrixMultiply
+  testPolyhedralAffineExprRendering
+  testPolyhedralScheduleRendering
+  testPolyhedralSummary
+  testPolyhedralLegality
+  testPolyhedralWavefrontLegality
+  testPolyhedralLoweringPhases
+  testPolyhedralInvalidLowering
+  testPolyhedralTiledMatMul
+  testPolyhedralWavefrontEditDistance
   testWavefrontFillCoverage
   testWavefrontEdgeCases
   testWavefrontPascal
@@ -415,6 +427,208 @@ testTiledMatrixMultiply = do
           writeArr c (i * colsB + j) total
   xs <- toList c
   assertEqual "tiled matrix multiply" [58, 64, 139, 154] xs
+
+testPolyhedralAffineExprRendering :: IO ()
+testPolyhedralAffineExprRendering = do
+  let expr =
+        Poly.plus
+          (Poly.scaled 3 Poly.rowVar)
+          (Poly.plus
+             (Poly.scaled (-2) Poly.colVar)
+             (Poly.plus (Poly.auxVar "k") (Poly.constant 5)))
+      shifted =
+        Poly.plus Poly.rowVar (Poly.constant (-3))
+  assertEqual "polyhedral affine expr render" "3*row - 2*col + k + 5" (Poly.renderAffineExpr expr)
+  assertEqual "polyhedral affine expr negative offset" "row - 3" (Poly.renderAffineExpr shifted)
+
+testPolyhedralScheduleRendering :: IO ()
+testPolyhedralScheduleRendering = do
+  let schedule =
+        Poly.composeSchedule2D
+          (Poly.affineSchedule2D interchange2D)
+          (Poly.composeSchedule2D Poly.identitySchedule2D (Poly.tileSchedule2D 2 3))
+  assertEqual "polyhedral identity schedule render" "identity" (Poly.renderSchedule2D Poly.identitySchedule2D)
+  assertEqual "polyhedral composed schedule render" "affine -> tile(2,3)" (Poly.renderSchedule2D schedule)
+
+testPolyhedralSummary :: IO ()
+testPolyhedralSummary = do
+  let access =
+        Poly.readAccess2D
+          "src"
+          (Poly.plus (Poly.scaled 4 Poly.rowVar) Poly.colVar)
+      kernel =
+        Poly.kernel2D
+          (sh2 4 4)
+          [ Poly.phase2D
+              "summary"
+              (Poly.composeSchedule2D Poly.identitySchedule2D (Poly.tileSchedule2D 2 3))
+              Poly.IndependentDependence2D
+              [access]
+              [Poly.writeAccess2D "dst" (Poly.plus (Poly.scaled 4 Poly.rowVar) Poly.colVar)]
+              (\_ _ -> pure ())
+          ]
+  case Poly.validateKernel2D kernel of
+    Left err -> error ("unexpected polyhedral validation failure: " ++ show err)
+    Right summary ->
+      case Poly.kernelSummaryPhases summary of
+        [phaseSummary] -> do
+          assertEqual "polyhedral schedule summary" "tile(2,3)" (Poly.renderSchedule2D (Poly.phaseSummarySchedule phaseSummary))
+          assertEqual "polyhedral access summary" "read src[4*row + col]" (Poly.renderAccess2D access)
+        _ -> error "expected one polyhedral phase summary"
+
+testPolyhedralLegality :: IO ()
+testPolyhedralLegality = do
+  let singularKernel =
+        Poly.kernel2D
+          (sh2 2 2)
+          [ Poly.phase2D
+              "singular"
+              (Poly.affineSchedule2D (affine2 1 0 0 0 0 0))
+              Poly.IndependentDependence2D
+              []
+              []
+              (\_ _ -> pure ())
+          ]
+      opaqueKernel =
+        Poly.kernel2D
+          (sh2 2 2)
+          [ Poly.phase2D
+              "opaque"
+              (Poly.tileSchedule2D 2 2)
+              (Poly.OpaqueDependence2D "stencil-carried dependence")
+              []
+              []
+              (\_ _ -> pure ())
+          ]
+  case Poly.validateKernel2D singularKernel of
+    Left err ->
+      assertEqual
+        "polyhedral singular affine rejected"
+        (Poly.InvalidSchedule2D "affine schedule stages must be invertible integer transforms")
+        err
+    Right _ ->
+      error "singular polyhedral schedule should fail"
+  case Poly.validateKernel2D opaqueKernel of
+    Left err ->
+      assertEqual
+        "polyhedral opaque dependence rejected"
+        (Poly.IllegalDependence2D "opaque dependences are only accepted with the identity schedule: stencil-carried dependence")
+        err
+    Right _ ->
+      error "opaque polyhedral dependence should fail"
+
+testPolyhedralWavefrontLegality :: IO ()
+testPolyhedralWavefrontLegality = do
+  let invalidKernel =
+        Poly.kernel2D
+          (sh2 3 3)
+          [ Poly.phase2D
+              "wavefront+tiled"
+              (Poly.composeSchedule2D Poly.wavefrontSchedule2D (Poly.tileSchedule2D 2 2))
+              Poly.WavefrontDependence2D
+              []
+              []
+              (\_ _ -> pure ())
+          ]
+      identityOpaqueKernel =
+        Poly.kernel2D
+          (sh2 2 2)
+          [ Poly.phase2D
+              "opaque-identity"
+              Poly.identitySchedule2D
+              (Poly.OpaqueDependence2D "allowed on identity")
+              []
+              []
+              (\_ _ -> pure ())
+          ]
+  case Poly.validateKernel2D invalidKernel of
+    Left err ->
+      assertEqual
+        "polyhedral wavefront schedule rejected"
+        (Poly.IllegalDependence2D "wavefront dependences require the wavefront schedule in the MVP polyhedral subset")
+        err
+    Right _ ->
+      error "invalid wavefront polyhedral schedule should fail"
+  case Poly.validateKernel2D identityOpaqueKernel of
+    Left err ->
+      error ("identity opaque polyhedral schedule should validate: " ++ show err)
+    Right _ ->
+      pure ()
+
+testPolyhedralLoweringPhases :: IO ()
+testPolyhedralLoweringPhases = do
+  arr <- newArr 6
+  let kernel =
+        Poly.kernel2D
+          (sh2 2 3)
+          [ Poly.phase2D
+              "fill"
+              Poly.identitySchedule2D
+              Poly.IndependentDependence2D
+              []
+              [Poly.writeAccess2D "arr" (Poly.plus (Poly.scaled 3 Poly.rowVar) Poly.colVar)]
+              (\i j -> writeArr arr (i * 3 + j) (i * 10 + j))
+          , Poly.phase2D
+              "bump"
+              (Poly.tileSchedule2D 1 2)
+              Poly.IndependentDependence2D
+              [Poly.readAccess2D "arr" (Poly.plus (Poly.scaled 3 Poly.rowVar) Poly.colVar)]
+              [Poly.writeAccess2D "arr" (Poly.plus (Poly.scaled 3 Poly.rowVar) Poly.colVar)]
+              (\i j -> do
+                 x <- readArr arr (i * 3 + j)
+                 writeArr arr (i * 3 + j) (x + 1))
+          ]
+  case Poly.lowerKernel2D kernel of
+    Left err ->
+      error ("unexpected polyhedral lowering failure: " ++ show err)
+    Right prog ->
+      runProg (parallel prog)
+  xs <- toList arr
+  assertEqual "polyhedral lowering phases" [1, 2, 3, 11, 12, 13] xs
+
+testPolyhedralInvalidLowering :: IO ()
+testPolyhedralInvalidLowering = do
+  let kernel =
+        Poly.kernel2D
+          (sh2 2 2)
+          [ Poly.phase2D
+              "bad-tile"
+              (Poly.tileSchedule2D 0 2)
+              Poly.IndependentDependence2D
+              []
+              []
+              (\_ _ -> pure ())
+          ]
+  case Poly.lowerKernel2D kernel of
+    Left err ->
+      assertEqual
+        "polyhedral invalid lowering rejected"
+        (Poly.InvalidSchedule2D "tile schedule stages require a positive row tile size")
+        err
+    Right _ ->
+      error "invalid polyhedral lowering should fail"
+
+testPolyhedralTiledMatMul :: IO ()
+testPolyhedralTiledMatMul = do
+  let n = 4
+      left = [1 .. n * n]
+      right =
+        [ 1, 0, 2, 1
+        , 0, 1, 1, 2
+        , 2, 1, 0, 1
+        , 1, 2, 1, 0
+        ]
+  xs <- runPolyhedralTiledMatMulExample n left right
+  ys <- runMatMulExample n left right
+  assertEqual "polyhedral tiled matmul" ys xs
+
+testPolyhedralWavefrontEditDistance :: IO ()
+testPolyhedralWavefrontEditDistance = do
+  let left = [1, 2, 3, 2]
+      right = [1, 3, 2]
+  distance <- runPolyhedralWavefrontEditDistanceExample left right
+  baseline <- runWavefrontEditDistanceExample left right
+  assertEqual "polyhedral wavefront edit distance" baseline distance
 
 testWavefrontFillCoverage :: IO ()
 testWavefrontFillCoverage = do
