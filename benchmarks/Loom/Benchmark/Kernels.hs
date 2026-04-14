@@ -5,6 +5,7 @@ module Loom.Benchmark.Kernels
   ( Benchmark (..)
   , benchmarks
   , lookupBenchmark
+  , runFill3DExample
   , runMatMulExample
   , runPolyhedralTiledMatMulExample
   , runPolyhedralWavefrontEditDistanceExample
@@ -64,6 +65,7 @@ data EditDistanceEnv = EditDistanceEnv
 benchmarks :: [Benchmark]
 benchmarks =
   [ Benchmark "fill" "parallel 1D fill into a fresh array" 1000000 setupFill runFill
+  , Benchmark "fill-3d" "parallel 3D fill into a fresh volume" 128 setupFill runFill3D
   , Benchmark "map" "parallel 1D elementwise map over two inputs" 1000000 setupBinaryVector runMap
   , Benchmark "sum" "parallel reduction over one vector" 1000000 setupUnaryVector runSum
   , Benchmark "dot" "parallel dot product over two vectors" 1000000 setupBinaryVector runDot
@@ -142,6 +144,17 @@ runFill n = do
         writeArr arr i (i * 3 + 1)
   sampleVector arr n
 
+runFill3D :: Int -> IO Int
+runFill3D n = do
+  let shape = sh3 n n n
+  arr <- newArr (n * n * n)
+  runProg $
+    parallel $
+      parForSh3 shape $ \ix ->
+        withIx3 ix $ \i j k ->
+          writeArr arr (index3 shape ix) (i * 1000000 + j * 1000 + k)
+  sampleVolume arr n
+
 runMap :: BinaryEnv -> IO Int
 runMap env = do
   let n = binaryLength env
@@ -196,6 +209,17 @@ runMatMulExample n xs ys = do
   out <- newArr (n * n)
   runMatMulKernel n left right out
   toList out
+
+runFill3DExample :: Int -> IO [Int]
+runFill3DExample n = do
+  let shape = sh3 n n n
+  arr <- newArr (n * n * n)
+  runProg $
+    parallel $
+      parForSh3 shape $ \ix ->
+        withIx3 ix $ \i j k ->
+          writeArr arr (index3 shape ix) (i * 100 + j * 10 + k)
+  toList arr
 
 runPolyhedralTiledMatMulExample :: Int -> [Int] -> [Int] -> IO [Int]
 runPolyhedralTiledMatMulExample n xs ys = do
@@ -542,6 +566,15 @@ sampleMatrix arr n = do
   center <- readArrIO arr (mid * n + mid)
   bottomRight <- readArrIO arr (n * n - 1)
   pure (topLeft + center + bottomRight)
+  where
+    mid = n `quot` 2
+
+sampleVolume :: Arr Int -> Int -> IO Int
+sampleVolume arr n = do
+  first <- readArrIO arr 0
+  center <- readArrIO arr (((mid * n) + mid) * n + mid)
+  lastValue <- readArrIO arr (n * n * n - 1)
+  pure (first + center + lastValue)
   where
     mid = n `quot` 2
 

@@ -7,8 +7,10 @@ module Loom.Internal.Kernel
   ( Arr
   , Ix1
   , Ix2
+  , Ix3
   , Sh1
   , Sh2
+  , Sh3
   , Rect2
   , Affine2
   , Transform2D
@@ -19,8 +21,10 @@ module Loom.Internal.Kernel
   , AccVar
   , ix1
   , ix2
+  , ix3
   , sh1
   , sh2
+  , sh3
   , rect2
   , affine2
   , newArr
@@ -28,10 +32,13 @@ module Loom.Internal.Kernel
   , toList
   , unIx1
   , unIx2
+  , unIx3
   , unRect2
   , withIx2
+  , withIx3
   , index1
   , index2
+  , index3
   , applyAffine2
   , composeAffine2
   , invertAffine2
@@ -55,7 +62,9 @@ module Loom.Internal.Kernel
   , parFor
   , parForSh1
   , parForSh2
+  , parForSh3
   , parFor2
+  , parFor3
   , parForRect2D
   , parForAffineRect2D
   , parForAffine2D
@@ -64,8 +73,11 @@ module Loom.Internal.Kernel
   , tiledForRect2D
   , parForTransform2D
   , tile2D
+  , tile3D
   , parForTile2D
+  , parForTile3D
   , tiledFor2D
+  , tiledFor3D
   , stripMine
   , broadcastVec
   , readArr
@@ -132,9 +144,13 @@ newtype Ix1 = Ix1 Int
 
 data Ix2 = Ix2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
+data Ix3 = Ix3 {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+
 newtype Sh1 = Sh1 Int
 
 data Sh2 = Sh2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+
+data Sh3 = Sh3 {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
 data Rect2 =
   Rect2
@@ -235,6 +251,7 @@ class Monad repr => Loop repr where
   loopBarrier :: repr ()
   loopParFor :: Int -> (Int -> repr ()) -> repr ()
   loopParFor2# :: Int# -> Int# -> (Int# -> Int# -> repr ()) -> repr ()
+  loopParFor3# :: Int# -> Int# -> Int# -> (Int# -> Int# -> Int# -> repr ()) -> repr ()
   loopReadArr :: Prim a => Arr a -> Int -> repr a
   loopWriteArr :: Prim a => Arr a -> Int -> a -> repr ()
   loopReadVec :: Prim a => Arr a -> Int -> repr (Vec a)
@@ -324,6 +341,21 @@ instance Loop Kernel where
             let !total = I# (n# *# m#)
              in dispatchLoop rt total $ \workerRt start end ->
                   runLinear2D workerRt m# body start end
+
+  loopParFor3# n# m# p# body = Kernel $ \rt ->
+    case n# <=# 0# of
+      1# -> pure ()
+      _ ->
+        case m# <=# 0# of
+          1# -> pure ()
+          _ ->
+            case p# <=# 0# of
+              1# -> pure ()
+              _ ->
+                let !plane# = m# *# p#
+                    !total = I# (n# *# plane#)
+                 in dispatchLoop rt total $ \workerRt start end ->
+                      runLinear3D workerRt m# p# body start end
 
   loopReadArr (Arr _ arr) i = Kernel (\_ -> readPrimArray arr i)
 
@@ -448,6 +480,10 @@ ix1 = Ix1
 ix2 :: Int -> Int -> Ix2
 ix2 = Ix2
 
+{-# INLINE ix3 #-}
+ix3 :: Int -> Int -> Int -> Ix3
+ix3 = Ix3
+
 {-# INLINE sh1 #-}
 sh1 :: Int -> Sh1
 sh1 = Sh1
@@ -455,6 +491,10 @@ sh1 = Sh1
 {-# INLINE sh2 #-}
 sh2 :: Int -> Int -> Sh2
 sh2 = Sh2
+
+{-# INLINE sh3 #-}
+sh3 :: Int -> Int -> Int -> Sh3
+sh3 = Sh3
 
 {-# INLINE rect2 #-}
 rect2 :: Int -> Int -> Int -> Int -> Rect2
@@ -472,6 +512,10 @@ unIx1 (Ix1 i) = i
 unIx2 :: Ix2 -> (Int, Int)
 unIx2 (Ix2 i j) = (i, j)
 
+{-# INLINE unIx3 #-}
+unIx3 :: Ix3 -> (Int, Int, Int)
+unIx3 (Ix3 i j k) = (i, j, k)
+
 {-# INLINE unRect2 #-}
 unRect2 :: Rect2 -> (Int, Int, Int, Int)
 unRect2 (Rect2 rowLo colLo rowHi colHi) = (rowLo, colLo, rowHi, colHi)
@@ -480,6 +524,10 @@ unRect2 (Rect2 rowLo colLo rowHi colHi) = (rowLo, colLo, rowHi, colHi)
 withIx2 :: Ix2 -> (Int -> Int -> r) -> r
 withIx2 (Ix2 i j) f = f i j
 
+{-# INLINE withIx3 #-}
+withIx3 :: Ix3 -> (Int -> Int -> Int -> r) -> r
+withIx3 (Ix3 i j k) f = f i j k
+
 {-# INLINE index1 #-}
 index1 :: Sh1 -> Ix1 -> Int
 index1 (Sh1 _) (Ix1 i) = i
@@ -487,6 +535,10 @@ index1 (Sh1 _) (Ix1 i) = i
 {-# INLINE index2 #-}
 index2 :: Sh2 -> Ix2 -> Int
 index2 (Sh2 _ n) (Ix2 i j) = i * n + j
+
+{-# INLINE index3 #-}
+index3 :: Sh3 -> Ix3 -> Int
+index3 (Sh3 _ m n) (Ix3 i j k) = ((i * m) + j) * n + k
 
 {-# INLINE applyAffine2 #-}
 applyAffine2 :: Affine2 -> Ix2 -> Ix2
@@ -751,9 +803,24 @@ parForSh2 (Sh2 n m) body =
         I# m# ->
           loopParForSh2# n# m# (\i# j# -> body (Ix2 (I# i#) (I# j#)))
 
+{-# INLINE parForSh3 #-}
+parForSh3 :: Sh3 -> (Ix3 -> Prog ()) -> Prog ()
+parForSh3 (Sh3 l m n) body =
+  case l of
+    I# l# ->
+      case m of
+        I# m# ->
+          case n of
+            I# n# ->
+              loopParForSh3# l# m# n# (\i# j# k# -> body (Ix3 (I# i#) (I# j#) (I# k#)))
+
 {-# INLINE parFor2 #-}
 parFor2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
 parFor2 = loopParForSh2
+
+{-# INLINE parFor3 #-}
+parFor3 :: Int -> Int -> Int -> (Int -> Int -> Int -> Prog ()) -> Prog ()
+parFor3 = loopParForSh3
 
 {-# INLINE parForRect2D #-}
 parForRect2D :: Rect2 -> (Ix2 -> Prog ()) -> Prog ()
@@ -837,13 +904,56 @@ tile2D tileRows tileCols (Sh2 rows cols) body =
                               case cols# <=# 0# of
                                 1# -> pure ()
                                 _ ->
-                                  loopParForSh2#
-                                    (tileCount# rows# tileRows#)
-                                    (tileCount# cols# tileCols#)
-                                    (\tileI# tileJ# ->
-                                       body
-                                         (I# (tileI# *# tileRows#))
-                                         (I# (tileJ# *# tileCols#)))
+                                   loopParForSh2#
+                                     (tileCount# rows# tileRows#)
+                                     (tileCount# cols# tileCols#)
+                                     (\tileI# tileJ# ->
+                                        body
+                                          (I# (tileI# *# tileRows#))
+                                          (I# (tileJ# *# tileCols#)))
+
+{-# INLINE tile3D #-}
+tile3D :: Int -> Int -> Int -> Sh3 -> (Int -> Int -> Int -> Prog ()) -> Prog ()
+tile3D tileDepth tileRows tileCols (Sh3 depth rows cols) body =
+  case tileDepth of
+    I# tileDepth# ->
+      case tileRows of
+        I# tileRows# ->
+          case tileCols of
+            I# tileCols# ->
+              case depth of
+                I# depth# ->
+                  case rows of
+                    I# rows# ->
+                      case cols of
+                        I# cols# ->
+                          case tileDepth# <=# 0# of
+                            1# -> invalidProgUsage "tile3D requires a positive depth tile size"
+                            _ ->
+                              case tileRows# <=# 0# of
+                                1# -> invalidProgUsage "tile3D requires a positive row tile size"
+                                _ ->
+                                  case tileCols# <=# 0# of
+                                    1# -> invalidProgUsage "tile3D requires a positive column tile size"
+                                    _ ->
+                                      case depth# <=# 0# of
+                                        1# -> pure ()
+                                        _ ->
+                                          case rows# <=# 0# of
+                                            1# -> pure ()
+                                            _ ->
+                                              case cols# <=# 0# of
+                                                1# -> pure ()
+                                                _ ->
+                                                  loopParForSh3#
+                                                    (tileCount# depth# tileDepth#)
+                                                    (tileCount# rows# tileRows#)
+                                                    (tileCount# cols# tileCols#)
+                                                    (\tileDepthIx# tileRowIx# tileColIx# ->
+                                                       body
+                                                         (I# (tileDepthIx# *# tileDepth#))
+                                                         (I# (tileRowIx# *# tileRows#))
+                                                         (I# (tileColIx# *# tileCols#)))
 
 {-# INLINE parForTile2D #-}
 parForTile2D :: Int -> Int -> Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
@@ -883,16 +993,92 @@ parForTile2D tileRows tileCols row0 col0 (Sh2 rows cols) body =
                                                       loopParForSh2#
                                                         rowCount#
                                                         colCount#
-                                                        (\i# j# ->
-                                                           body
-                                                             (I# (row0# +# i#))
-                                                             (I# (col0# +# j#)))
+                                                       (\i# j# ->
+                                                          body
+                                                            (I# (row0# +# i#))
+                                                            (I# (col0# +# j#)))
+
+{-# INLINE parForTile3D #-}
+parForTile3D ::
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Sh3 ->
+  (Int -> Int -> Int -> Prog ()) ->
+  Prog ()
+parForTile3D tileDepth tileRows tileCols depth0 row0 col0 (Sh3 depth rows cols) body =
+  case tileDepth of
+    I# tileDepth# ->
+      case tileRows of
+        I# tileRows# ->
+          case tileCols of
+            I# tileCols# ->
+              case depth0 of
+                I# depth0# ->
+                  case row0 of
+                    I# row0# ->
+                      case col0 of
+                        I# col0# ->
+                          case depth of
+                            I# depth# ->
+                              case rows of
+                                I# rows# ->
+                                  case cols of
+                                    I# cols# ->
+                                      case tileDepth# <=# 0# of
+                                        1# -> invalidProgUsage "parForTile3D requires a positive depth tile size"
+                                        _ ->
+                                          case tileRows# <=# 0# of
+                                            1# -> invalidProgUsage "parForTile3D requires a positive row tile size"
+                                            _ ->
+                                              case tileCols# <=# 0# of
+                                                1# -> invalidProgUsage "parForTile3D requires a positive column tile size"
+                                                _ ->
+                                                  case depth0# <# 0# of
+                                                    1# -> invalidProgUsage "parForTile3D requires a non-negative depth origin"
+                                                    _ ->
+                                                      case row0# <# 0# of
+                                                        1# -> invalidProgUsage "parForTile3D requires a non-negative row origin"
+                                                        _ ->
+                                                          case col0# <# 0# of
+                                                            1# -> invalidProgUsage "parForTile3D requires a non-negative column origin"
+                                                            _ ->
+                                                              let !depthCount# = tileSpan# depth# depth0# tileDepth#
+                                                                  !rowCount# = tileSpan# rows# row0# tileRows#
+                                                                  !colCount# = tileSpan# cols# col0# tileCols#
+                                                               in case depthCount# <=# 0# of
+                                                                    1# -> pure ()
+                                                                    _ ->
+                                                                      case rowCount# <=# 0# of
+                                                                        1# -> pure ()
+                                                                        _ ->
+                                                                          case colCount# <=# 0# of
+                                                                            1# -> pure ()
+                                                                            _ ->
+                                                                              loopParForSh3#
+                                                                                depthCount#
+                                                                                rowCount#
+                                                                                colCount#
+                                                                                (\i# j# k# ->
+                                                                                   body
+                                                                                     (I# (depth0# +# i#))
+                                                                                     (I# (row0# +# j#))
+                                                                                     (I# (col0# +# k#)))
 
 {-# INLINE tiledFor2D #-}
 tiledFor2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
 tiledFor2D tileRows tileCols shape body =
   tile2D tileRows tileCols shape $ \row0 col0 ->
     parForTile2D tileRows tileCols row0 col0 shape body
+
+{-# INLINE tiledFor3D #-}
+tiledFor3D :: Int -> Int -> Int -> Sh3 -> (Int -> Int -> Int -> Prog ()) -> Prog ()
+tiledFor3D tileDepth tileRows tileCols shape body =
+  tile3D tileDepth tileRows tileCols shape $ \depth0 row0 col0 ->
+    parForTile3D tileDepth tileRows tileCols depth0 row0 col0 shape body
 
 {-# INLINE stripMine #-}
 stripMine :: Int -> Int -> (Int -> Prog ()) -> (Int -> Prog ()) -> Prog ()
@@ -1011,11 +1197,23 @@ loopParForSh2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
 loopParForSh2 (I# rows#) (I# cols#) body =
   loopParForSh2# rows# cols# (\i# j# -> body (I# i#) (I# j#))
 
+{-# INLINE loopParForSh3 #-}
+loopParForSh3 :: Int -> Int -> Int -> (Int -> Int -> Int -> Prog ()) -> Prog ()
+loopParForSh3 (I# depth#) (I# rows#) (I# cols#) body =
+  loopParForSh3# depth# rows# cols# (\i# j# k# -> body (I# i#) (I# j#) (I# k#))
+
 {-# INLINE loopParForSh2# #-}
 loopParForSh2# :: Int# -> Int# -> (Int# -> Int# -> Prog ()) -> Prog ()
 loopParForSh2# rows# cols# body =
   Prog $ \k -> do
     loopParFor2# rows# cols# (\i# j# -> unProg (body i# j#) (\() -> pure ()))
+    k ()
+
+{-# INLINE loopParForSh3# #-}
+loopParForSh3# :: Int# -> Int# -> Int# -> (Int# -> Int# -> Int# -> Prog ()) -> Prog ()
+loopParForSh3# depth# rows# cols# body =
+  Prog $ \k -> do
+    loopParFor3# depth# rows# cols# (\i# j# k# -> unProg (body i# j# k#) (\() -> pure ()))
     k ()
 
 {-# INLINE tileCount# #-}
@@ -1090,6 +1288,44 @@ runLinear2D !workerRt m# body start end =
           case j'# <# m# of
             1# -> go idx'# end# i# j'#
             _ -> go idx'# end# (i# +# 1#) 0#
+
+runLinear3D ::
+  Runtime ->
+  Int# ->
+  Int# ->
+  (Int# -> Int# -> Int# -> Kernel ()) ->
+  Int ->
+  Int ->
+  IO ()
+runLinear3D !workerRt m# p# body start end =
+  case start of
+    I# start# ->
+      case end of
+        I# end# ->
+          case start# >=# end# of
+            1# -> pure ()
+            _ ->
+              let !plane# = m# *# p#
+                  !i0# = quotInt# start# plane#
+                  !rem0# = start# -# (i0# *# plane#)
+                  !j0# = quotInt# rem0# p#
+                  !k0# = rem0# -# (j0# *# p#)
+               in go start# end# i0# j0# k0#
+  where
+    go !idx# !end# !i# !j# !k# =
+      case idx# >=# end# of
+        1# -> pure ()
+        _ -> do
+          runKernel (body i# j# k#) workerRt
+          let !k'# = k# +# 1#
+              !idx'# = idx# +# 1#
+          case k'# <# p# of
+            1# -> go idx'# end# i# j# k'#
+            _ ->
+              let !j'# = j# +# 1#
+               in case j'# <# m# of
+                    1# -> go idx'# end# i# j'# 0#
+                    _ -> go idx'# end# (i# +# 1#) 0# 0#
 
 shouldShareReducer :: Runtime -> Bool
 shouldShareReducer rt =

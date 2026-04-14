@@ -10,7 +10,8 @@ import qualified Loom.Polyhedral as Poly
 import qualified Loom.Verify as Verify
 import qualified Loom.Verify.Polyhedral as VerifyPoly
 import Loom.Benchmark.Kernels
-  ( runMatMulExample
+  ( runFill3DExample
+  , runMatMulExample
   , runPolyhedralTiledMatMulExample
   , runPolyhedralWavefrontEditDistanceExample
   , runRedBlackStencilExample
@@ -25,8 +26,11 @@ main = do
   testIndexHelpers
   testAffine2Basics
   testShapeLoop1D
+  testShapeLoop3D
   testReducerSum
   testVerifiedFill
+  testVerifiedFill3D
+  testVerifiedTiled3D
   testVerifiedMap
   testVerifiedSum
   testVerifiedDot
@@ -63,7 +67,9 @@ main = do
   testTransform2DSkewInterchange
   testTransform2DRejectsSingularAffine
   testTiledFor2D
+  testTiledFor3D
   testTiledMatrixMultiply
+  testFill3DBenchmark
   testPolyhedralAffineExprRendering
   testPolyhedralScheduleRendering
   testPolyhedralSummary
@@ -95,8 +101,10 @@ testIndexHelpers :: IO ()
 testIndexHelpers = do
   assertEqual "unIx1" 3 (unIx1 (ix1 3))
   assertEqual "unIx2" (2, 1) (unIx2 (ix2 2 1))
+  assertEqual "unIx3" (1, 2, 3) (unIx3 (ix3 1 2 3))
   assertEqual "index1" 4 (index1 (sh1 8) (ix1 4))
   assertEqual "index2" 9 (index2 (sh2 3 4) (ix2 2 1))
+  assertEqual "index3" 23 (index3 (sh3 2 3 4) (ix3 1 2 3))
 
 testAffine2Basics :: IO ()
 testAffine2Basics = do
@@ -119,6 +127,24 @@ testShapeLoop1D = do
   xs <- toList arr
   assertEqual "shape loop 1d" [0, 2, 4, 6, 8, 10] xs
 
+testShapeLoop3D :: IO ()
+testShapeLoop3D = do
+  let depth = 2
+      rows = 3
+      cols = 4
+      shape = sh3 depth rows cols
+  arr <- newArr (depth * rows * cols)
+  runProg $
+    parallel $
+      parForSh3 shape $ \ix ->
+        withIx3 ix $ \i j k ->
+          writeArr arr (index3 shape ix) (i * 100 + j * 10 + k)
+  xs <- toList arr
+  assertEqual
+    "shape loop 3d"
+    [i * 100 + j * 10 + k | i <- [0 .. depth - 1], j <- [0 .. rows - 1], k <- [0 .. cols - 1]]
+    xs
+
 testReducerSum :: IO ()
 testReducerSum = do
   arr <- fromList [1 .. 10 :: Int]
@@ -137,6 +163,38 @@ testVerifiedFill = do
         Verify.writeAt ctx arr ix (Verify.unIndex1 ix * 2)
   xs <- Verify.toList arr
   assertEqual "verified fill" [0, 2, 4, 6, 8, 10] xs
+
+testVerifiedFill3D :: IO ()
+testVerifiedFill3D = do
+  let shape = Verify.shape3 2 3 4
+  arr <- Verify.newArray shape
+  Verify.runProg $
+    Verify.parallel $
+      Verify.parFor3D shape $ \ctx ix ->
+        case Verify.unIndex3 ix of
+          (i, j, k) ->
+            Verify.writeAt ctx arr ix (i * 100 + j * 10 + k)
+  xs <- Verify.toList arr
+  assertEqual
+    "verified fill 3d"
+    [i * 100 + j * 10 + k | i <- [0 .. 1], j <- [0 .. 2], k <- [0 .. 3]]
+    xs
+
+testVerifiedTiled3D :: IO ()
+testVerifiedTiled3D = do
+  let shape = Verify.shape3 2 3 4
+  arr <- Verify.newArray shape
+  Verify.runProg $
+    Verify.parallel $
+      Verify.parForTiled3D 1 2 3 shape $ \ctx ix ->
+        case Verify.unIndex3 ix of
+          (i, j, k) ->
+            Verify.writeAt ctx arr ix (i * 100 + j * 10 + k)
+  xs <- Verify.toList arr
+  assertEqual
+    "verified tiled 3d"
+    [i * 100 + j * 10 + k | i <- [0 .. 1], j <- [0 .. 2], k <- [0 .. 3]]
+    xs
 
 testVerifiedMap :: IO ()
 testVerifiedMap = do
@@ -633,6 +691,23 @@ testTiledFor2D = do
   xs <- toList arr
   assertEqual "tiled for 2d" [i * 10 + j | i <- [0 .. rows - 1], j <- [0 .. cols - 1]] xs
 
+testTiledFor3D :: IO ()
+testTiledFor3D = do
+  let depth = 2
+      rows = 3
+      cols = 4
+      shape = sh3 depth rows cols
+  arr <- newArr (depth * rows * cols)
+  runProg $
+    parallel $
+      tiledFor3D 1 2 3 shape $ \i j k ->
+        writeArr arr (index3 shape (ix3 i j k)) (i * 100 + j * 10 + k)
+  xs <- toList arr
+  assertEqual
+    "tiled for 3d"
+    [i * 100 + j * 10 + k | i <- [0 .. depth - 1], j <- [0 .. rows - 1], k <- [0 .. cols - 1]]
+    xs
+
 testTiledMatrixMultiply :: IO ()
 testTiledMatrixMultiply = do
   let rowsA = 2
@@ -653,6 +728,14 @@ testTiledMatrixMultiply = do
           writeArr c (i * colsB + j) total
   xs <- toList c
   assertEqual "tiled matrix multiply" [58, 64, 139, 154] xs
+
+testFill3DBenchmark :: IO ()
+testFill3DBenchmark = do
+  xs <- runFill3DExample 2
+  assertEqual
+    "fill 3d benchmark"
+    [i * 100 + j * 10 + k | i <- [0 .. 1], j <- [0 .. 1], k <- [0 .. 1]]
+    xs
 
 testPolyhedralAffineExprRendering :: IO ()
 testPolyhedralAffineExprRendering = do

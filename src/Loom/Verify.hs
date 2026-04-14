@@ -12,10 +12,13 @@ module Loom.Verify
   , ReduceVar
   , shape1
   , shape2
+  , shape3
   , rectIx1
   , rectIx2
+  , rectIx3
   , extent1
   , extent2
+  , extent3
   , newArray
   , fromList
   , toList
@@ -23,7 +26,9 @@ module Loom.Verify
   , unwrapArray
   , parFor1D
   , parFor2D
+  , parFor3D
   , parForTiled2D
+  , parForTiled3D
   , parForWavefront2D
   , foldFor1D
   , rectReadAccess1D
@@ -47,6 +52,7 @@ module Loom.Verify
   , waveCoordsOf
   , unIndex1
   , unIndex2
+  , unIndex3
   , runProg
   , parallel
   , barrier

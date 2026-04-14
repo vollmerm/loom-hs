@@ -2,8 +2,10 @@ module Loom
   ( Arr
   , Ix1
   , Ix2
+  , Ix3
   , Sh1
   , Sh2
+  , Sh3
   , Rect2
   , Affine2
   , Transform2D
@@ -14,8 +16,10 @@ module Loom
   , AccVar
   , ix1
   , ix2
+  , ix3
   , sh1
   , sh2
+  , sh3
   , rect2
   , affine2
   , newArr
@@ -23,10 +27,13 @@ module Loom
   , toList
   , unIx1
   , unIx2
+  , unIx3
   , unRect2
   , withIx2
+  , withIx3
   , index1
   , index2
+  , index3
   , applyAffine2
   , composeAffine2
   , invertAffine2
@@ -50,7 +57,9 @@ module Loom
   , parFor
   , parForSh1
   , parForSh2
+  , parForSh3
   , parFor2
+  , parFor3
   , parForRect2D
   , parForAffineRect2D
   , parForAffine2D
@@ -59,8 +68,11 @@ module Loom
   , tiledForRect2D
   , parForTransform2D
   , tile2D
+  , tile3D
   , parForTile2D
+  , parForTile3D
   , tiledFor2D
+  , tiledFor3D
   , stripMine
   , broadcastVec
   , readArr
