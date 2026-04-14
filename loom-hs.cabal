@@ -65,6 +65,7 @@ library
     exposed-modules:
         Loom
         Loom.Verify
+        Loom.Verify.Polyhedral
         Loom.Polyhedral
 
     -- Modules included in this library but not exported.

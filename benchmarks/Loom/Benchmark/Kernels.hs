@@ -16,6 +16,8 @@ module Loom.Benchmark.Kernels
 
 import Loom
 import qualified Loom.Polyhedral as Poly
+import qualified Loom.Verify as Verify
+import qualified Loom.Verify.Polyhedral as VerifyPoly
 
 data Benchmark = forall env. Benchmark
   { benchmarkName :: String
@@ -462,26 +464,19 @@ requirePolyhedral label compiled =
     Left err -> error (label ++ ": " ++ show err)
     Right prog -> prog
 
-rowMajorAccess :: Int -> Poly.AffineExpr -> Poly.AffineExpr -> Poly.AffineExpr
-rowMajorAccess stride row col =
-  Poly.plus (Poly.scaled stride row) col
-
-offsetAccess :: Poly.AffineExpr -> Int -> Poly.AffineExpr
-offsetAccess expr delta = Poly.plus expr (Poly.constant delta)
-
 polyhedralTiledMatMulKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> Either Poly.PolyhedralError (Prog ())
 polyhedralTiledMatMulKernel n left right out =
   Poly.lowerKernel2D $
     Poly.kernel2D
       (sh2 n n)
-      [ Poly.phase2D
+      [ VerifyPoly.phase2DForVerifiedSchedule
           "tiled-matmul"
-          (Poly.tileSchedule2D tile tile)
+          (VerifyPoly.TileSchedule2D tile tile)
           Poly.IndependentDependence2D
-          [ Poly.readAccess2D "left" (rowMajorAccess n Poly.rowVar (Poly.auxVar "k"))
-          , Poly.readAccess2D "right" (rowMajorAccess n (Poly.auxVar "k") Poly.colVar)
+          [ VerifyPoly.rowMajorRead2D "left" n Poly.rowVar (Poly.auxVar "k")
+          , VerifyPoly.rowMajorRead2D "right" n (Poly.auxVar "k") Poly.colVar
           ]
-          [Poly.writeAccess2D "out" (rowMajorAccess n Poly.rowVar Poly.colVar)]
+          [VerifyPoly.rowMajorWrite2D "out" n Poly.rowVar Poly.colVar]
           (\i j -> writeMatMulScalarCell n left right out i j)
       ]
   where
@@ -499,17 +494,17 @@ polyhedralWavefrontKernel rows cols tableCols left right dp =
   Poly.lowerKernel2D $
     Poly.kernel2D
       (sh2 rows cols)
-      [ Poly.phase2D
+      [ VerifyPoly.phase2DForVerifiedSchedule
           "edit-distance-wavefront"
-          Poly.wavefrontSchedule2D
+          VerifyPoly.WavefrontSchedule2D
           Poly.WavefrontDependence2D
-          [ Poly.readAccess2D "dp" (offsetAccess (rowMajorAccess tableCols Poly.rowVar Poly.colVar) 1)
-          , Poly.readAccess2D "dp" (offsetAccess (rowMajorAccess tableCols Poly.rowVar Poly.colVar) tableCols)
-          , Poly.readAccess2D "dp" (rowMajorAccess tableCols Poly.rowVar Poly.colVar)
+          [ VerifyPoly.waveRowMajorRead2D "dp" tableCols (1, 1) Verify.WavePrevRow
+          , VerifyPoly.waveRowMajorRead2D "dp" tableCols (1, 1) Verify.WavePrevCol
+          , VerifyPoly.waveRowMajorRead2D "dp" tableCols (1, 1) Verify.WavePrevDiag
           , Poly.readAccess2D "left" Poly.rowVar
           , Poly.readAccess2D "right" Poly.colVar
           ]
-          [Poly.writeAccess2D "dp" (offsetAccess (rowMajorAccess tableCols Poly.rowVar Poly.colVar) (tableCols + 1))]
+          [VerifyPoly.waveRowMajorWrite2D "dp" tableCols (1, 1)]
           (\i0 j0 -> do
              let i = i0 + 1
                  j = j0 + 1

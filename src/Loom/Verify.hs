@@ -2,6 +2,7 @@ module Loom.Verify
   ( Rank
   , Schedule
   , Capability
+  , WaveOffset (..)
   , Shape
   , Array
   , Index
@@ -11,6 +12,8 @@ module Loom.Verify
   , ReduceVar
   , shape1
   , shape2
+  , rectIx1
+  , rectIx2
   , extent1
   , extent2
   , newArray
@@ -20,6 +23,8 @@ module Loom.Verify
   , unwrapArray
   , parFor1D
   , parFor2D
+  , parForTiled2D
+  , parForWavefront2D
   , foldFor1D
   , rectReadAccess1D
   , rectReadAccess2D
@@ -27,16 +32,19 @@ module Loom.Verify
   , rectWriteAccess2D
   , rectReadWriteAccess1D
   , rectReadWriteAccess2D
-  , rectAccess1D
-  , rectAccess2D
   , newReducer
   , reduce
   , getReducer
   , readAt
   , writeAt
+  , readWaveAt
+  , writeWaveAt
   , rowOf
   , colOf
   , pairOf
+  , tileOriginOf
+  , tileLocalOf
+  , waveCoordsOf
   , unIndex1
   , unIndex2
   , runProg

@@ -8,6 +8,7 @@ import GHC.Conc (getNumCapabilities)
 import Loom
 import qualified Loom.Polyhedral as Poly
 import qualified Loom.Verify as Verify
+import qualified Loom.Verify.Polyhedral as VerifyPoly
 import Loom.Benchmark.Kernels
   ( runMatMulExample
   , runPolyhedralTiledMatMulExample
@@ -33,6 +34,8 @@ main = do
   testVerifiedShapeMismatch
   testVerifiedReducerScope
   testVerifiedThreePhaseNormalize
+  testVerifiedTiledMatMul
+  testVerifiedWavefrontEditDistance
   testAccumFor
   testVecPrimitives
   testStripMine
@@ -70,6 +73,7 @@ main = do
   testPolyhedralInvalidLowering
   testPolyhedralTiledMatMul
   testPolyhedralWavefrontEditDistance
+  testVerifiedPolyhedralBridge
   testWavefrontFillCoverage
   testWavefrontEdgeCases
   testWavefrontPascal
@@ -155,7 +159,7 @@ testVerifiedSum = do
   arr <- Verify.fromList shape [1 .. 10 :: Int]
   total <- Verify.runProg $
     Verify.foldFor1D Verify.intSum shape $ \ix ->
-      Verify.readAt (Verify.rectAccess1D shape) arr ix
+      Verify.readAt (Verify.rectReadAccess1D shape) arr ix
   assertEqual "verified sum" 55 total
 
 testVerifiedDot :: IO ()
@@ -165,7 +169,7 @@ testVerifiedDot = do
   right <- Verify.fromList shape [5, 6, 7, 8 :: Int]
   total <- Verify.runProg $
     Verify.foldFor1D Verify.intSum shape $ \ix -> do
-      let ctx = Verify.rectAccess1D shape
+      let ctx = Verify.rectReadAccess1D shape
       x <- Verify.readAt ctx left ix
       y <- Verify.readAt ctx right ix
       pure (x * y)
@@ -262,6 +266,79 @@ testVerifiedThreePhaseNormalize = do
             Verify.writeAt ctx out ix ((x - mean) * invStd)
   xs <- Verify.toList out
   assertApproxList "verified three-phase normalize" 1e-12 (expectedNormalized input) xs
+
+testVerifiedTiledMatMul :: IO ()
+testVerifiedTiledMatMul = do
+  let shape = Verify.shape2 4 4
+      kShape = Verify.shape1 4
+  left <- Verify.fromList shape [1 .. 16 :: Int]
+  right <-
+    Verify.fromList
+      shape
+      [ 1, 0, 0, 0
+      , 0, 1, 0, 0
+      , 0, 0, 1, 0
+      , 0, 0, 0, 1
+      ]
+  out <- Verify.newArray shape
+  Verify.runProg $
+    Verify.parallel $
+      Verify.parForTiled2D 2 2 shape $ \ctx outIx -> do
+        let row = Verify.rowOf outIx
+            col = Verify.colOf outIx
+            lhsCtx = Verify.rectReadAccess2D shape
+            rhsCtx = Verify.rectReadAccess2D shape
+        total <-
+          Verify.foldFor1D Verify.intSum kShape $ \k -> do
+            lhs <- Verify.readAt lhsCtx left (Verify.pairOf row k)
+            rhs <- Verify.readAt rhsCtx right (Verify.pairOf k col)
+            pure (lhs * rhs)
+        Verify.writeAt ctx out outIx total
+  xs <- Verify.toList out
+  assertEqual "verified tiled matmul" [1 .. 16] xs
+
+testVerifiedWavefrontEditDistance :: IO ()
+testVerifiedWavefrontEditDistance = do
+  let leftInput = [1, 2, 3, 2]
+      rightInput = [1, 3, 2]
+      leftShape = Verify.shape1 (length leftInput)
+      rightShape = Verify.shape1 (length rightInput)
+      waveShape = Verify.shape2 (length leftInput) (length rightInput)
+      dpShape = Verify.shape2 (length leftInput + 1) (length rightInput + 1)
+  left <- Verify.fromList leftShape leftInput
+  right <- Verify.fromList rightShape rightInput
+  dp <- Verify.newArray dpShape
+  Verify.runProg $
+    Verify.parallel $ do
+      Verify.parFor1D (Verify.shape1 (length leftInput + 1)) $ \_ ix ->
+        Verify.writeAt
+          (Verify.rectReadWriteAccess2D dpShape)
+          dp
+          (Verify.pairOf ix (Verify.rectIx1 0))
+          (Verify.unIndex1 ix)
+      Verify.barrier
+      Verify.parFor1D rightShape $ \_ ix -> do
+        let j = Verify.unIndex1 ix + 1
+        Verify.writeAt
+          (Verify.rectReadWriteAccess2D dpShape)
+          dp
+          (Verify.rectIx2 0 j)
+          j
+      Verify.barrier
+      Verify.parForWavefront2D waveShape $ \ctx ix -> do
+        deletion <- Verify.readWaveAt ctx dp (1, 1) Verify.WavePrevRow ix
+        insertion <- Verify.readWaveAt ctx dp (1, 1) Verify.WavePrevCol ix
+        substitution <- Verify.readWaveAt ctx dp (1, 1) Verify.WavePrevDiag ix
+        x <- Verify.readAt (Verify.rectReadAccess1D leftShape) left (Verify.rowOf ix)
+        y <- Verify.readAt (Verify.rectReadAccess1D rightShape) right (Verify.colOf ix)
+        let cost
+              | x == y = 0
+              | otherwise = 1
+            cell = min (deletion + 1) (min (insertion + 1) (substitution + cost))
+        Verify.writeWaveAt ctx dp (1, 1) ix cell
+  xs <- Verify.toList dp
+  baseline <- runWavefrontEditDistanceExample leftInput rightInput
+  assertEqual "verified wavefront edit distance" baseline (last xs)
 
 testAccumFor :: IO ()
 testAccumFor = do
@@ -778,6 +855,21 @@ testPolyhedralWavefrontEditDistance = do
   distance <- runPolyhedralWavefrontEditDistanceExample left right
   baseline <- runWavefrontEditDistanceExample left right
   assertEqual "polyhedral wavefront edit distance" baseline distance
+
+testVerifiedPolyhedralBridge :: IO ()
+testVerifiedPolyhedralBridge = do
+  assertEqual
+    "verified polyhedral tile schedule"
+    "tile(2,3)"
+    (Poly.renderSchedule2D (VerifyPoly.verifiedSchedule2D (VerifyPoly.TileSchedule2D 2 3)))
+  assertEqual
+    "verified polyhedral wave write"
+    "write dp[5*row + col + 6]"
+    (Poly.renderAccess2D (VerifyPoly.waveRowMajorWrite2D "dp" 5 (1, 1)))
+  assertEqual
+    "verified polyhedral wave prevdiag"
+    "read dp[5*row + col]"
+    (Poly.renderAccess2D (VerifyPoly.waveRowMajorRead2D "dp" 5 (1, 1) Verify.WavePrevDiag))
 
 testWavefrontFillCoverage :: IO ()
 testWavefrontFillCoverage = do

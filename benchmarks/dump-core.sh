@@ -20,7 +20,10 @@ cabal exec -- ghc \
   -ddump-to-file \
   -dsuppress-all \
   src/Loom/Internal/Kernel.hs \
+  src/Loom/Internal/Verify.hs \
   src/Loom.hs \
+  src/Loom/Verify.hs \
+  src/Loom/Verify/Polyhedral.hs \
   benchmarks/Loom/Benchmark/Kernels.hs \
   benchmarks/Loom/Benchmark/Harness.hs \
   benchmarks/Main.hs \
@@ -31,3 +34,4 @@ echo "Generated simplified Core under: $out_dir"
 echo "Useful dump files include:"
 echo "  $out_dir/Main.dump-simpl"
 echo "  $out_dir/Loom.Benchmark.Kernels.dump-simpl"
+echo "  $out_dir/Loom.Verify.dump-simpl"
