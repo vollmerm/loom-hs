@@ -1,7 +1,13 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UnboxedTuples #-}
+
+#include "MachDeps.h"
 
 module Loom.Internal.Kernel
   ( Arr
@@ -15,6 +21,9 @@ module Loom.Internal.Kernel
   , Affine2
   , Transform2D
   , Vec
+  , IVec
+  , I32Vec
+  , DVec
   , Prog
   , Reducer
   , RedVar
@@ -80,17 +89,39 @@ module Loom.Internal.Kernel
   , tiledFor3D
   , stripMine
   , broadcastVec
+  , broadcastIVec
+  , broadcastI32Vec
+  , broadcastDVec
   , readArr
   , writeArr
   , readVec
+  , readIVec
+  , readI32Vec
+  , readDVec
   , writeVec
+  , writeIVec
+  , writeI32Vec
+  , writeDVec
   , addVec
+  , addIVec
+  , addI32Vec
+  , addDVec
   , mulVec
+  , mulIVec
+  , mulI32Vec
+  , mulDVec
   , sumVec
+  , sumIVec
+  , sumI32Vec
+  , sumDVec
   , newReducer
   , reduce
   , getReducer
   , accumFor
+  , accumVecFor
+  , accumIVecFor
+  , accumI32VecFor
+  , accumDVecFor
   , newAcc
   , readAcc
   , writeAcc
@@ -98,13 +129,14 @@ module Loom.Internal.Kernel
   , mkReducer
   , mkReducerWith
   , intSum
+  , int32Sum
   , doubleSum
   ) where
 
 import Control.Concurrent (MVar, forkIOWithUnmask, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, throwIO, try)
 import Control.Monad (ap)
-import Control.Monad.ST (RealWorld)
+import Control.Monad.Primitive (primitive)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.Primitive.Array
   ( MutableArray
@@ -113,7 +145,7 @@ import Data.Primitive.Array
   , writeArray
   )
 import Data.Primitive.PrimArray
-  ( MutablePrimArray
+  ( MutablePrimArray (..)
   , newPrimArray
   , readPrimArray
   , writePrimArray
@@ -126,17 +158,11 @@ import Data.Primitive.PrimVar
   )
 import Data.Primitive.Types (Prim)
 import GHC.Conc (getNumCapabilities)
-import GHC.Exts
-  ( Int (I#)
-  , Int#
-  , (*#)
-  , (+#)
-  , (-#)
-  , (<#)
-  , (<=#)
-  , (>=#)
-  , quotInt#
+import GHC.Exts hiding
+  ( fromList
+  , toList
   )
+import GHC.Int (Int32 (..))
 
 data Arr a = Arr !Int !(MutablePrimArray RealWorld a)
 
@@ -196,7 +222,65 @@ data NormalizedTransformStage2D
 
 newtype NormalizedTransform2D = NormalizedTransform2D [NormalizedTransformStage2D]
 
-data Vec a = Vec !a !a !a !a
+data Vec a where
+  Vec :: !a -> !a -> !a -> !a -> Vec a
+#if WORD_SIZE_IN_BITS == 64
+  VecInt :: Int64X2# -> Int64X2# -> Vec Int
+#else
+  VecInt :: Int32X4# -> Vec Int
+#endif
+  VecInt32 :: Int32X4# -> Vec Int32
+  VecDouble :: DoubleX2# -> DoubleX2# -> Vec Double
+
+#if WORD_SIZE_IN_BITS == 64
+data IVec = IVec Int64X2# Int64X2#
+#else
+data IVec = IVec Int32X4#
+#endif
+
+data I32Vec = I32Vec Int32X4#
+
+data DVec = DVec DoubleX2# DoubleX2#
+
+class (Prim a, Num a) => VecOps a where
+  readVecIO :: MutablePrimArray RealWorld a -> Int -> IO (Vec a)
+  writeVecIO :: MutablePrimArray RealWorld a -> Int -> Vec a -> IO ()
+  broadcastVecIO :: a -> Vec a
+  addVecIO :: Vec a -> Vec a -> Vec a
+  mulVecIO :: Vec a -> Vec a -> Vec a
+  sumVecIO :: Vec a -> a
+
+instance {-# OVERLAPPABLE #-} (Prim a, Num a) => VecOps a where
+  readVecIO = readVecScalar
+  writeVecIO = writeVecScalar
+  broadcastVecIO = broadcastVecScalar
+  addVecIO = addVecScalar
+  mulVecIO = mulVecScalar
+  sumVecIO = sumVecScalar
+
+instance VecOps Int where
+  readVecIO = readVecInt
+  writeVecIO = writeVecInt
+  broadcastVecIO = broadcastVecInt
+  addVecIO = addVecInt
+  mulVecIO = mulVecInt
+  sumVecIO = sumVecInt
+
+instance VecOps Int32 where
+  readVecIO = readVecInt32
+  writeVecIO = writeVecInt32
+  broadcastVecIO = broadcastVecInt32
+  addVecIO = addVecInt32
+  mulVecIO = mulVecInt32
+  sumVecIO = sumVecInt32
+
+instance VecOps Double where
+  readVecIO = readVecDouble
+  writeVecIO = writeVecDouble
+  broadcastVecIO = broadcastVecDouble
+  addVecIO = addVecDouble
+  mulVecIO = mulVecDouble
+  sumVecIO = sumVecDouble
 
 data ReducerSpec rep a = ReducerSpec
   { reducerInit :: !rep
@@ -254,12 +338,22 @@ class Monad repr => Loop repr where
   loopParFor3# :: Int# -> Int# -> Int# -> (Int# -> Int# -> Int# -> repr ()) -> repr ()
   loopReadArr :: Prim a => Arr a -> Int -> repr a
   loopWriteArr :: Prim a => Arr a -> Int -> a -> repr ()
-  loopReadVec :: Prim a => Arr a -> Int -> repr (Vec a)
-  loopWriteVec :: Prim a => Arr a -> Int -> Vec a -> repr ()
+  loopReadVec :: VecOps a => Arr a -> Int -> repr (Vec a)
+  loopWriteVec :: VecOps a => Arr a -> Int -> Vec a -> repr ()
+  loopReadIVec :: Arr Int -> Int -> repr IVec
+  loopWriteIVec :: Arr Int -> Int -> IVec -> repr ()
+  loopReadI32Vec :: Arr Int32 -> Int -> repr I32Vec
+  loopWriteI32Vec :: Arr Int32 -> Int -> I32Vec -> repr ()
+  loopReadDVec :: Arr Double -> Int -> repr DVec
+  loopWriteDVec :: Arr Double -> Int -> DVec -> repr ()
   loopNewReducer :: Reducer a -> (RedVar a -> repr r) -> repr r
   loopReduce :: RedVar a -> a -> repr ()
   loopGetReducer :: RedVar a -> repr a
   loopAccumFor :: Int -> a -> (a -> Int -> repr a) -> repr a
+  loopAccumVecFor :: VecAccum a => Int -> Vec a -> (Vec a -> Int -> repr (Vec a)) -> repr (Vec a)
+  loopAccumIVecFor :: Int -> IVec -> (IVec -> Int -> repr IVec) -> repr IVec
+  loopAccumI32VecFor :: Int -> I32Vec -> (I32Vec -> Int -> repr I32Vec) -> repr I32Vec
+  loopAccumDVecFor :: Int -> DVec -> (DVec -> Int -> repr DVec) -> repr DVec
   loopNewAcc :: Prim a => a -> (AccVar a -> repr r) -> repr r
   loopReadAcc :: Prim a => AccVar a -> repr a
   loopWriteAcc :: Prim a => AccVar a -> a -> repr ()
@@ -361,18 +455,21 @@ instance Loop Kernel where
 
   loopWriteArr (Arr _ arr) i x = Kernel (\_ -> writePrimArray arr i x)
 
-  loopReadVec (Arr _ arr) i = Kernel $ \_ -> do
-    !x0 <- readPrimArray arr i
-    !x1 <- readPrimArray arr (i + 1)
-    !x2 <- readPrimArray arr (i + 2)
-    !x3 <- readPrimArray arr (i + 3)
-    pure (Vec x0 x1 x2 x3)
+  loopReadVec (Arr _ arr) i = Kernel (\_ -> readVecIO arr i)
 
-  loopWriteVec (Arr _ arr) i (Vec x0 x1 x2 x3) = Kernel $ \_ -> do
-    writePrimArray arr i x0
-    writePrimArray arr (i + 1) x1
-    writePrimArray arr (i + 2) x2
-    writePrimArray arr (i + 3) x3
+  loopWriteVec (Arr _ arr) i vec = Kernel (\_ -> writeVecIO arr i vec)
+
+  loopReadIVec (Arr _ arr) i = Kernel (\_ -> readIVecIO arr i)
+
+  loopWriteIVec (Arr _ arr) i vec = Kernel (\_ -> writeIVecIO arr i vec)
+
+  loopReadI32Vec (Arr _ arr) i = Kernel (\_ -> readI32VecIO arr i)
+
+  loopWriteI32Vec (Arr _ arr) i vec = Kernel (\_ -> writeI32VecIO arr i vec)
+
+  loopReadDVec (Arr _ arr) i = Kernel (\_ -> readDVecIO arr i)
+
+  loopWriteDVec (Arr _ arr) i vec = Kernel (\_ -> writeDVecIO arr i vec)
 
   loopNewReducer reducer body =
     Kernel $ \rt -> do
@@ -415,6 +512,37 @@ instance Loop Kernel where
               go (i + 1) acc'
      in go 0 initial
 
+  loopAccumVecFor n initial body =
+    Kernel $ \rt ->
+      accumVecForIO rt n initial (\acc i -> runKernel (body acc i) rt)
+
+  loopAccumIVecFor n initial body =
+    Kernel $ \rt ->
+      let go !i acc
+            | i >= n = pure acc
+            | otherwise = do
+                acc' <- runKernel (body acc i) rt
+                go (i + 1) acc'
+       in go 0 initial
+
+  loopAccumI32VecFor n (I32Vec v0) body =
+    Kernel $ \rt ->
+      let go !i v
+            | i >= n = pure (I32Vec v)
+            | otherwise = do
+                I32Vec v' <- runKernel (body (I32Vec v) i) rt
+                go (i + 1) v'
+       in go 0 v0
+
+  loopAccumDVecFor n (DVec lo0 hi0) body =
+    Kernel $ \rt ->
+      let go !i lo hi
+            | i >= n = pure (DVec lo hi)
+            | otherwise = do
+                DVec lo' hi' <- runKernel (body (DVec lo hi) i) rt
+                go (i + 1) lo' hi'
+       in go 0 lo0 hi0
+
   loopNewAcc initial body =
     Kernel $ \rt -> do
       var <- newPrimVar initial
@@ -432,6 +560,73 @@ instance Loop Kernel where
               let !acc' = reducerStep spec acc x
               go (i + 1) acc'
      in go 0 (reducerInit spec)
+
+class VecAccum a where
+  accumVecForIO :: Runtime -> Int -> Vec a -> (Vec a -> Int -> IO (Vec a)) -> IO (Vec a)
+
+genericAccumVecForIO :: Runtime -> Int -> Vec a -> (Vec a -> Int -> IO (Vec a)) -> IO (Vec a)
+genericAccumVecForIO _ n initial body =
+  let go !i !acc
+        | i >= n = pure acc
+        | otherwise = do
+            acc' <- body acc i
+            go (i + 1) acc'
+   in go 0 initial
+
+instance {-# OVERLAPPABLE #-} VecOps a => VecAccum a where
+  accumVecForIO = genericAccumVecForIO
+
+instance VecAccum Int where
+  accumVecForIO _ n initial body =
+#if WORD_SIZE_IN_BITS == 64
+    case simdOfIntVec initial of
+      (# lo0, hi0 #) ->
+        let go !i lo hi
+              | i >= n = pure (VecInt lo hi)
+              | otherwise = do
+                  acc <- body (VecInt lo hi) i
+                  case simdOfIntVec acc of
+                    (# lo', hi' #) ->
+                      go (i + 1) lo' hi'
+         in go 0 lo0 hi0
+#else
+    case simdOfIntVec initial of
+      v0 ->
+        let go !i v
+              | i >= n = pure (VecInt v)
+              | otherwise = do
+                  acc <- body (VecInt v) i
+                  case simdOfIntVec acc of
+                    v' ->
+                      go (i + 1) v'
+         in go 0 v0
+#endif
+
+instance VecAccum Int32 where
+  accumVecForIO _ n initial body =
+    case simdOfInt32Vec initial of
+      v0 ->
+        let go !i v
+              | i >= n = pure (VecInt32 v)
+              | otherwise = do
+                  acc <- body (VecInt32 v) i
+                  case simdOfInt32Vec acc of
+                    v' ->
+                      go (i + 1) v'
+         in go 0 v0
+
+instance VecAccum Double where
+  accumVecForIO _ n initial body =
+    case simdOfDoubleVec initial of
+      (# lo0, hi0 #) ->
+        let go !i lo hi
+              | i >= n = pure (VecDouble lo hi)
+              | otherwise = do
+                  acc <- body (VecDouble lo hi) i
+                  case simdOfDoubleVec acc of
+                    (# lo', hi' #) ->
+                      go (i + 1) lo' hi'
+         in go 0 lo0 hi0
 
 {-# INLINE newArr #-}
 newArr :: Prim a => Int -> IO (Arr a)
@@ -754,23 +949,553 @@ boundingBoxAffine2D affine rect@(Rect2 rowLo colLo rowHi colHi)
 vecWidth :: Int
 vecWidth = 4
 
+{-# INLINE impossibleScalarVec #-}
+impossibleScalarVec :: String -> a
+impossibleScalarVec name =
+      error (name <> ": unexpected SIMD-backed vector in scalar Vec path")
+
+{-# INLINE readVecScalar #-}
+readVecScalar :: Prim a => MutablePrimArray RealWorld a -> Int -> IO (Vec a)
+readVecScalar arr i = do
+  !x0 <- readPrimArray arr i
+  !x1 <- readPrimArray arr (i + 1)
+  !x2 <- readPrimArray arr (i + 2)
+  !x3 <- readPrimArray arr (i + 3)
+  pure (Vec x0 x1 x2 x3)
+
+{-# INLINE writeVecScalar #-}
+writeVecScalar :: Prim a => MutablePrimArray RealWorld a -> Int -> Vec a -> IO ()
+writeVecScalar arr i vec =
+  case vec of
+    Vec x0 x1 x2 x3 -> do
+      writePrimArray arr i x0
+      writePrimArray arr (i + 1) x1
+      writePrimArray arr (i + 2) x2
+      writePrimArray arr (i + 3) x3
+    _ ->
+      impossibleScalarVec "writeVecScalar"
+
+{-# INLINE broadcastVecScalar #-}
+broadcastVecScalar :: a -> Vec a
+broadcastVecScalar x = Vec x x x x
+
+{-# INLINE addVecScalar #-}
+addVecScalar :: Num a => Vec a -> Vec a -> Vec a
+addVecScalar left right =
+  case left of
+    Vec a0 a1 a2 a3 ->
+      case right of
+        Vec b0 b1 b2 b3 ->
+          Vec (a0 + b0) (a1 + b1) (a2 + b2) (a3 + b3)
+        _ ->
+          impossibleScalarVec "addVecScalar"
+    _ ->
+      impossibleScalarVec "addVecScalar"
+
+{-# INLINE mulVecScalar #-}
+mulVecScalar :: Num a => Vec a -> Vec a -> Vec a
+mulVecScalar left right =
+  case left of
+    Vec a0 a1 a2 a3 ->
+      case right of
+        Vec b0 b1 b2 b3 ->
+          Vec (a0 * b0) (a1 * b1) (a2 * b2) (a3 * b3)
+        _ ->
+          impossibleScalarVec "mulVecScalar"
+    _ ->
+      impossibleScalarVec "mulVecScalar"
+
+{-# INLINE sumVecScalar #-}
+sumVecScalar :: Num a => Vec a -> a
+sumVecScalar vec =
+  case vec of
+    Vec x0 x1 x2 x3 ->
+      ((x0 + x1) + x2) + x3
+    _ ->
+      impossibleScalarVec "sumVecScalar"
+
+#if WORD_SIZE_IN_BITS == 64
+{-# INLINE simdOfIntVec #-}
+simdOfIntVec :: Vec Int -> (# Int64X2#, Int64X2# #)
+simdOfIntVec vec =
+  case vec of
+    VecInt lo hi ->
+      (# lo, hi #)
+    Vec x0 x1 x2 x3 ->
+      (# packInt64X2# (# intToInt64# (case x0 of I# x0# -> x0#)
+                        , intToInt64# (case x1 of I# x1# -> x1#)
+                        #)
+       , packInt64X2# (# intToInt64# (case x2 of I# x2# -> x2#)
+                        , intToInt64# (case x3 of I# x3# -> x3#)
+                        #)
+       #)
+
+{-# INLINE broadcastVecInt #-}
+broadcastVecInt :: Int -> Vec Int
+broadcastVecInt (I# x#) =
+  VecInt
+    (broadcastInt64X2# (intToInt64# x#))
+    (broadcastInt64X2# (intToInt64# x#))
+
+{-# INLINE addVecInt #-}
+addVecInt :: Vec Int -> Vec Int -> Vec Int
+addVecInt left right =
+  case simdOfIntVec left of
+    (# leftLo, leftHi #) ->
+      case simdOfIntVec right of
+        (# rightLo, rightHi #) ->
+          VecInt
+            (plusInt64X2# leftLo rightLo)
+            (plusInt64X2# leftHi rightHi)
+
+{-# INLINE mulVecInt #-}
+mulVecInt :: Vec Int -> Vec Int -> Vec Int
+mulVecInt left right =
+  case simdOfIntVec left of
+    (# leftLo, leftHi #) ->
+      case simdOfIntVec right of
+        (# rightLo, rightHi #) ->
+          VecInt
+            (timesInt64X2# leftLo rightLo)
+            (timesInt64X2# leftHi rightHi)
+
+{-# INLINE sumVecInt #-}
+sumVecInt :: Vec Int -> Int
+sumVecInt vec =
+  case simdOfIntVec vec of
+    (# lo, hi #) ->
+      case plusInt64X2# lo hi of
+        sums ->
+          case unpackInt64X2# sums of
+            (# s0#, s1# #) ->
+              I# (int64ToInt# s0# +# int64ToInt# s1#)
+#else
+{-# INLINE simdOfIntVec #-}
+simdOfIntVec :: Vec Int -> Int32X4#
+simdOfIntVec vec =
+  case vec of
+    VecInt v ->
+      v
+    Vec x0 x1 x2 x3 ->
+      packInt32X4#
+        (# intToInt32# (case x0 of I# x0# -> x0#)
+         , intToInt32# (case x1 of I# x1# -> x1#)
+         , intToInt32# (case x2 of I# x2# -> x2#)
+         , intToInt32# (case x3 of I# x3# -> x3#)
+         #)
+
+{-# INLINE broadcastVecInt #-}
+broadcastVecInt :: Int -> Vec Int
+broadcastVecInt (I# x#) = VecInt (broadcastInt32X4# (intToInt32# x#))
+
+{-# INLINE addVecInt #-}
+addVecInt :: Vec Int -> Vec Int -> Vec Int
+addVecInt left right =
+  VecInt (plusInt32X4# (simdOfIntVec left) (simdOfIntVec right))
+
+{-# INLINE mulVecInt #-}
+mulVecInt :: Vec Int -> Vec Int -> Vec Int
+mulVecInt left right =
+  VecInt (timesInt32X4# (simdOfIntVec left) (simdOfIntVec right))
+
+{-# INLINE sumVecInt #-}
+sumVecInt :: Vec Int -> Int
+sumVecInt vec =
+  case unpackInt32X4# (simdOfIntVec vec) of
+    (# x0#, x1#, x2#, x3# #) ->
+      I#
+        ((((int32ToInt# x0#) +# (int32ToInt# x1#)) +# (int32ToInt# x2#))
+           +# (int32ToInt# x3#))
+#endif
+
+{-# INLINE readVecInt #-}
+readVecInt :: MutablePrimArray RealWorld Int -> Int -> IO (Vec Int)
+readVecInt (MutablePrimArray mba#) (I# i#) =
+#if WORD_SIZE_IN_BITS == 64
+  primitive $ \s0 ->
+    case readInt64ArrayAsInt64X2# mba# i# s0 of
+      (# s1, lo #) ->
+        case readInt64ArrayAsInt64X2# mba# (i# +# 2#) s1 of
+          (# s2, hi #) ->
+            (# s2, VecInt lo hi #)
+#else
+  primitive $ \s0 ->
+    case readInt32ArrayAsInt32X4# mba# i# s0 of
+      (# s1, v #) ->
+        (# s1, VecInt v #)
+#endif
+
+{-# INLINE writeVecInt #-}
+writeVecInt :: MutablePrimArray RealWorld Int -> Int -> Vec Int -> IO ()
+writeVecInt (MutablePrimArray mba#) (I# i#) vec =
+  case simdOfIntVec vec of
+#if WORD_SIZE_IN_BITS == 64
+    (# lo, hi #) ->
+      primitive $ \s0 ->
+        case writeInt64ArrayAsInt64X2# mba# i# lo s0 of
+          s1 ->
+            case writeInt64ArrayAsInt64X2# mba# (i# +# 2#) hi s1 of
+              s2 ->
+                (# s2, () #)
+#else
+    v ->
+      primitive $ \s0 ->
+        case writeInt32ArrayAsInt32X4# mba# i# v s0 of
+          s1 ->
+            (# s1, () #)
+#endif
+
+{-# INLINE readIVecIO #-}
+readIVecIO :: MutablePrimArray RealWorld Int -> Int -> IO IVec
+readIVecIO (MutablePrimArray mba#) (I# i#) =
+#if WORD_SIZE_IN_BITS == 64
+  primitive $ \s0 ->
+    case readInt64ArrayAsInt64X2# mba# i# s0 of
+      (# s1, lo #) ->
+        case readInt64ArrayAsInt64X2# mba# (i# +# 2#) s1 of
+          (# s2, hi #) ->
+            (# s2, IVec lo hi #)
+#else
+  primitive $ \s0 ->
+    case readInt32ArrayAsInt32X4# mba# i# s0 of
+      (# s1, v #) ->
+        (# s1, IVec v #)
+#endif
+
+{-# INLINE writeIVecIO #-}
+writeIVecIO :: MutablePrimArray RealWorld Int -> Int -> IVec -> IO ()
+writeIVecIO (MutablePrimArray mba#) (I# i#) vec =
+#if WORD_SIZE_IN_BITS == 64
+  case vec of
+    IVec lo hi ->
+      primitive $ \s0 ->
+        case writeInt64ArrayAsInt64X2# mba# i# lo s0 of
+          s1 ->
+            case writeInt64ArrayAsInt64X2# mba# (i# +# 2#) hi s1 of
+              s2 ->
+                (# s2, () #)
+#else
+  case vec of
+    IVec v ->
+      primitive $ \s0 ->
+        case writeInt32ArrayAsInt32X4# mba# i# v s0 of
+          s1 ->
+            (# s1, () #)
+#endif
+
+{-# INLINE broadcastIVec #-}
+broadcastIVec :: Int -> IVec
+broadcastIVec (I# x#) =
+#if WORD_SIZE_IN_BITS == 64
+  IVec
+    (broadcastInt64X2# (intToInt64# x#))
+    (broadcastInt64X2# (intToInt64# x#))
+#else
+  IVec (broadcastInt32X4# (intToInt32# x#))
+#endif
+
+{-# INLINE addIVec #-}
+addIVec :: IVec -> IVec -> IVec
+addIVec left right =
+#if WORD_SIZE_IN_BITS == 64
+  case left of
+    IVec leftLo leftHi ->
+      case right of
+        IVec rightLo rightHi ->
+          IVec
+            (plusInt64X2# leftLo rightLo)
+            (plusInt64X2# leftHi rightHi)
+#else
+  case left of
+    IVec leftV ->
+      case right of
+        IVec rightV ->
+          IVec (plusInt32X4# leftV rightV)
+#endif
+
+{-# INLINE mulIVec #-}
+mulIVec :: IVec -> IVec -> IVec
+mulIVec left right =
+#if WORD_SIZE_IN_BITS == 64
+  case left of
+    IVec leftLo leftHi ->
+      case right of
+        IVec rightLo rightHi ->
+          IVec
+            (timesInt64X2# leftLo rightLo)
+            (timesInt64X2# leftHi rightHi)
+#else
+  case left of
+    IVec leftV ->
+      case right of
+        IVec rightV ->
+          IVec (timesInt32X4# leftV rightV)
+#endif
+
+{-# INLINE sumIVec #-}
+sumIVec :: IVec -> Int
+sumIVec vec =
+#if WORD_SIZE_IN_BITS == 64
+  case vec of
+    IVec lo hi ->
+      case plusInt64X2# lo hi of
+        sums ->
+          case unpackInt64X2# sums of
+            (# s0#, s1# #) ->
+              I# (int64ToInt# s0# +# int64ToInt# s1#)
+#else
+  case vec of
+    IVec v ->
+      case unpackInt32X4# v of
+        (# x0#, x1#, x2#, x3# #) ->
+          I# ((((int32ToInt# x0#) +# (int32ToInt# x1#)) +# (int32ToInt# x2#)) +# (int32ToInt# x3#))
+#endif
+
+{-# INLINE simdOfInt32Vec #-}
+simdOfInt32Vec :: Vec Int32 -> Int32X4#
+simdOfInt32Vec vec =
+  case vec of
+    VecInt32 v ->
+      v
+    Vec x0 x1 x2 x3 ->
+      packInt32X4#
+        (# case x0 of I32# x0# -> x0#
+         , case x1 of I32# x1# -> x1#
+         , case x2 of I32# x2# -> x2#
+         , case x3 of I32# x3# -> x3#
+         #)
+
+{-# INLINE broadcastVecInt32 #-}
+broadcastVecInt32 :: Int32 -> Vec Int32
+broadcastVecInt32 (I32# x#) = VecInt32 (broadcastInt32X4# x#)
+
+{-# INLINE addVecInt32 #-}
+addVecInt32 :: Vec Int32 -> Vec Int32 -> Vec Int32
+addVecInt32 left right =
+  VecInt32 (plusInt32X4# (simdOfInt32Vec left) (simdOfInt32Vec right))
+
+{-# INLINE mulVecInt32 #-}
+mulVecInt32 :: Vec Int32 -> Vec Int32 -> Vec Int32
+mulVecInt32 left right =
+  VecInt32 (timesInt32X4# (simdOfInt32Vec left) (simdOfInt32Vec right))
+
+{-# INLINE sumVecInt32 #-}
+sumVecInt32 :: Vec Int32 -> Int32
+sumVecInt32 vec =
+  case unpackInt32X4# (simdOfInt32Vec vec) of
+    (# x0#, x1#, x2#, x3# #) ->
+      I32#
+        (intToInt32#
+           ((((int32ToInt# x0#) +# (int32ToInt# x1#)) +# (int32ToInt# x2#))
+              +# (int32ToInt# x3#)))
+
+{-# INLINE readVecInt32 #-}
+readVecInt32 :: MutablePrimArray RealWorld Int32 -> Int -> IO (Vec Int32)
+readVecInt32 (MutablePrimArray mba#) (I# i#) =
+  primitive $ \s0 ->
+    case readInt32ArrayAsInt32X4# mba# i# s0 of
+      (# s1, v #) ->
+        (# s1, VecInt32 v #)
+
+{-# INLINE writeVecInt32 #-}
+writeVecInt32 :: MutablePrimArray RealWorld Int32 -> Int -> Vec Int32 -> IO ()
+writeVecInt32 (MutablePrimArray mba#) (I# i#) vec =
+  primitive $ \s0 ->
+    case writeInt32ArrayAsInt32X4# mba# i# (simdOfInt32Vec vec) s0 of
+      s1 ->
+        (# s1, () #)
+
+{-# INLINE readI32VecIO #-}
+readI32VecIO :: MutablePrimArray RealWorld Int32 -> Int -> IO I32Vec
+readI32VecIO (MutablePrimArray mba#) (I# i#) =
+  primitive $ \s0 ->
+    case readInt32ArrayAsInt32X4# mba# i# s0 of
+      (# s1, v #) ->
+        (# s1, I32Vec v #)
+
+{-# INLINE writeI32VecIO #-}
+writeI32VecIO :: MutablePrimArray RealWorld Int32 -> Int -> I32Vec -> IO ()
+writeI32VecIO (MutablePrimArray mba#) (I# i#) (I32Vec v) =
+  primitive $ \s0 ->
+    case writeInt32ArrayAsInt32X4# mba# i# v s0 of
+      s1 ->
+        (# s1, () #)
+
+{-# INLINE broadcastI32Vec #-}
+broadcastI32Vec :: Int32 -> I32Vec
+broadcastI32Vec (I32# x#) = I32Vec (broadcastInt32X4# x#)
+
+{-# INLINE addI32Vec #-}
+addI32Vec :: I32Vec -> I32Vec -> I32Vec
+addI32Vec (I32Vec leftV) (I32Vec rightV) =
+  I32Vec (plusInt32X4# leftV rightV)
+
+{-# INLINE mulI32Vec #-}
+mulI32Vec :: I32Vec -> I32Vec -> I32Vec
+mulI32Vec (I32Vec leftV) (I32Vec rightV) =
+  I32Vec (timesInt32X4# leftV rightV)
+
+{-# INLINE sumI32Vec #-}
+sumI32Vec :: I32Vec -> Int32
+sumI32Vec (I32Vec v) =
+  case unpackInt32X4# v of
+    (# x0#, x1#, x2#, x3# #) ->
+      I32#
+        (intToInt32#
+           ((((int32ToInt# x0#) +# (int32ToInt# x1#)) +# (int32ToInt# x2#))
+              +# (int32ToInt# x3#)))
+
+{-# INLINE simdOfDoubleVec #-}
+simdOfDoubleVec :: Vec Double -> (# DoubleX2#, DoubleX2# #)
+simdOfDoubleVec vec =
+  case vec of
+    VecDouble lo hi ->
+      (# lo, hi #)
+    Vec x0 x1 x2 x3 ->
+      (# packDoubleX2# (# case x0 of D# x0# -> x0#
+                          , case x1 of D# x1# -> x1#
+                          #)
+       , packDoubleX2# (# case x2 of D# x2# -> x2#
+                          , case x3 of D# x3# -> x3#
+                          #)
+       #)
+
+{-# INLINE broadcastVecDouble #-}
+broadcastVecDouble :: Double -> Vec Double
+broadcastVecDouble (D# x#) =
+  VecDouble
+    (broadcastDoubleX2# x#)
+    (broadcastDoubleX2# x#)
+
+{-# INLINE addVecDouble #-}
+addVecDouble :: Vec Double -> Vec Double -> Vec Double
+addVecDouble left right =
+  case simdOfDoubleVec left of
+    (# leftLo, leftHi #) ->
+      case simdOfDoubleVec right of
+        (# rightLo, rightHi #) ->
+          VecDouble
+            (plusDoubleX2# leftLo rightLo)
+            (plusDoubleX2# leftHi rightHi)
+
+{-# INLINE mulVecDouble #-}
+mulVecDouble :: Vec Double -> Vec Double -> Vec Double
+mulVecDouble left right =
+  case simdOfDoubleVec left of
+    (# leftLo, leftHi #) ->
+      case simdOfDoubleVec right of
+        (# rightLo, rightHi #) ->
+          VecDouble
+            (timesDoubleX2# leftLo rightLo)
+            (timesDoubleX2# leftHi rightHi)
+
+{-# INLINE sumVecDouble #-}
+sumVecDouble :: Vec Double -> Double
+sumVecDouble vec =
+  case simdOfDoubleVec vec of
+    (# lo, hi #) ->
+      case plusDoubleX2# lo hi of
+        sums ->
+          case unpackDoubleX2# sums of
+            (# s0#, s1# #) ->
+              D# (s0# +## s1#)
+
+{-# INLINE readVecDouble #-}
+readVecDouble :: MutablePrimArray RealWorld Double -> Int -> IO (Vec Double)
+readVecDouble (MutablePrimArray mba#) (I# i#) =
+  primitive $ \s0 ->
+    case readDoubleArrayAsDoubleX2# mba# i# s0 of
+      (# s1, lo #) ->
+        case readDoubleArrayAsDoubleX2# mba# (i# +# 2#) s1 of
+          (# s2, hi #) ->
+            (# s2, VecDouble lo hi #)
+
+{-# INLINE writeVecDouble #-}
+writeVecDouble :: MutablePrimArray RealWorld Double -> Int -> Vec Double -> IO ()
+writeVecDouble (MutablePrimArray mba#) (I# i#) vec =
+  case simdOfDoubleVec vec of
+    (# lo, hi #) ->
+      primitive $ \s0 ->
+        case writeDoubleArrayAsDoubleX2# mba# i# lo s0 of
+          s1 ->
+            case writeDoubleArrayAsDoubleX2# mba# (i# +# 2#) hi s1 of
+              s2 ->
+                (# s2, () #)
+
+{-# INLINE readDVecIO #-}
+readDVecIO :: MutablePrimArray RealWorld Double -> Int -> IO DVec
+readDVecIO (MutablePrimArray mba#) (I# i#) =
+  primitive $ \s0 ->
+    case readDoubleArrayAsDoubleX2# mba# i# s0 of
+      (# s1, lo #) ->
+        case readDoubleArrayAsDoubleX2# mba# (i# +# 2#) s1 of
+          (# s2, hi #) ->
+            (# s2, DVec lo hi #)
+
+{-# INLINE writeDVecIO #-}
+writeDVecIO :: MutablePrimArray RealWorld Double -> Int -> DVec -> IO ()
+writeDVecIO (MutablePrimArray mba#) (I# i#) (DVec lo hi) =
+  primitive $ \s0 ->
+    case writeDoubleArrayAsDoubleX2# mba# i# lo s0 of
+      s1 ->
+        case writeDoubleArrayAsDoubleX2# mba# (i# +# 2#) hi s1 of
+          s2 ->
+            (# s2, () #)
+
+{-# INLINE broadcastDVec #-}
+broadcastDVec :: Double -> DVec
+broadcastDVec (D# x#) = DVec (broadcastDoubleX2# x#) (broadcastDoubleX2# x#)
+
+{-# INLINE addDVec #-}
+addDVec :: DVec -> DVec -> DVec
+addDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
+  DVec
+    (plusDoubleX2# leftLo rightLo)
+    (plusDoubleX2# leftHi rightHi)
+
+{-# INLINE mulDVec #-}
+mulDVec :: DVec -> DVec -> DVec
+mulDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
+  DVec
+    (timesDoubleX2# leftLo rightLo)
+    (timesDoubleX2# leftHi rightHi)
+
+{-# INLINE sumDVec #-}
+sumDVec :: DVec -> Double
+sumDVec (DVec lo hi) =
+  case plusDoubleX2# lo hi of
+    sums ->
+      case unpackDoubleX2# sums of
+        (# s0#, s1# #) ->
+          D# (s0# +## s1#)
+
 {-# INLINE broadcastVec #-}
-broadcastVec :: a -> Vec a
-broadcastVec x = Vec x x x x
+broadcastVec :: VecOps a => a -> Vec a
+broadcastVec = broadcastVecIO
+{-# SPECIALIZE INLINE broadcastVec :: Int -> Vec Int #-}
+{-# SPECIALIZE INLINE broadcastVec :: Int32 -> Vec Int32 #-}
+{-# SPECIALIZE INLINE broadcastVec :: Double -> Vec Double #-}
 
 {-# INLINE addVec #-}
-addVec :: Num a => Vec a -> Vec a -> Vec a
-addVec (Vec a0 a1 a2 a3) (Vec b0 b1 b2 b3) =
-  Vec (a0 + b0) (a1 + b1) (a2 + b2) (a3 + b3)
+addVec :: VecOps a => Vec a -> Vec a -> Vec a
+addVec = addVecIO
+{-# SPECIALIZE INLINE addVec :: Vec Int -> Vec Int -> Vec Int #-}
+{-# SPECIALIZE INLINE addVec :: Vec Int32 -> Vec Int32 -> Vec Int32 #-}
+{-# SPECIALIZE INLINE addVec :: Vec Double -> Vec Double -> Vec Double #-}
 
 {-# INLINE mulVec #-}
-mulVec :: Num a => Vec a -> Vec a -> Vec a
-mulVec (Vec a0 a1 a2 a3) (Vec b0 b1 b2 b3) =
-  Vec (a0 * b0) (a1 * b1) (a2 * b2) (a3 * b3)
+mulVec :: VecOps a => Vec a -> Vec a -> Vec a
+mulVec = mulVecIO
+{-# SPECIALIZE INLINE mulVec :: Vec Int -> Vec Int -> Vec Int #-}
+{-# SPECIALIZE INLINE mulVec :: Vec Int32 -> Vec Int32 -> Vec Int32 #-}
+{-# SPECIALIZE INLINE mulVec :: Vec Double -> Vec Double -> Vec Double #-}
 
 {-# INLINE sumVec #-}
-sumVec :: Num a => Vec a -> a
-sumVec (Vec x0 x1 x2 x3) = ((x0 + x1) + x2) + x3
+sumVec :: VecOps a => Vec a -> a
+sumVec = sumVecIO
+{-# SPECIALIZE INLINE sumVec :: Vec Int -> Int #-}
+{-# SPECIALIZE INLINE sumVec :: Vec Int32 -> Int32 #-}
+{-# SPECIALIZE INLINE sumVec :: Vec Double -> Double #-}
 
 {-# INLINE parallel #-}
 parallel :: Prog a -> Prog a
@@ -1106,13 +1831,49 @@ writeArr arr i x = Prog $ \k -> do
   k ()
 
 {-# INLINE readVec #-}
-readVec :: Prim a => Arr a -> Int -> Prog (Vec a)
+readVec :: VecOps a => Arr a -> Int -> Prog (Vec a)
 readVec arr i = Prog $ \k -> loopReadVec arr i >>= k
+{-# SPECIALIZE INLINE readVec :: Arr Int -> Int -> Prog (Vec Int) #-}
+{-# SPECIALIZE INLINE readVec :: Arr Int32 -> Int -> Prog (Vec Int32) #-}
+{-# SPECIALIZE INLINE readVec :: Arr Double -> Int -> Prog (Vec Double) #-}
+
+{-# INLINE readIVec #-}
+readIVec :: Arr Int -> Int -> Prog IVec
+readIVec arr i = Prog $ \k -> loopReadIVec arr i >>= k
+
+{-# INLINE readI32Vec #-}
+readI32Vec :: Arr Int32 -> Int -> Prog I32Vec
+readI32Vec arr i = Prog $ \k -> loopReadI32Vec arr i >>= k
+
+{-# INLINE readDVec #-}
+readDVec :: Arr Double -> Int -> Prog DVec
+readDVec arr i = Prog $ \k -> loopReadDVec arr i >>= k
 
 {-# INLINE writeVec #-}
-writeVec :: Prim a => Arr a -> Int -> Vec a -> Prog ()
+writeVec :: VecOps a => Arr a -> Int -> Vec a -> Prog ()
 writeVec arr i vec = Prog $ \k -> do
   loopWriteVec arr i vec
+  k ()
+{-# SPECIALIZE INLINE writeVec :: Arr Int -> Int -> Vec Int -> Prog () #-}
+{-# SPECIALIZE INLINE writeVec :: Arr Int32 -> Int -> Vec Int32 -> Prog () #-}
+{-# SPECIALIZE INLINE writeVec :: Arr Double -> Int -> Vec Double -> Prog () #-}
+
+{-# INLINE writeIVec #-}
+writeIVec :: Arr Int -> Int -> IVec -> Prog ()
+writeIVec arr i vec = Prog $ \k -> do
+  loopWriteIVec arr i vec
+  k ()
+
+{-# INLINE writeI32Vec #-}
+writeI32Vec :: Arr Int32 -> Int -> I32Vec -> Prog ()
+writeI32Vec arr i vec = Prog $ \k -> do
+  loopWriteI32Vec arr i vec
+  k ()
+
+{-# INLINE writeDVec #-}
+writeDVec :: Arr Double -> Int -> DVec -> Prog ()
+writeDVec arr i vec = Prog $ \k -> do
+  loopWriteDVec arr i vec
   k ()
 
 {-# INLINE newReducer #-}
@@ -1134,6 +1895,26 @@ getReducer redVar = Prog $ \k -> loopGetReducer redVar >>= k
 accumFor :: Int -> a -> (a -> Int -> Prog a) -> Prog a
 accumFor n initial body =
   Prog $ \k -> loopAccumFor n initial (\acc i -> unProg (body acc i) pure) >>= k
+
+{-# INLINE accumVecFor #-}
+accumVecFor :: VecAccum a => Int -> Vec a -> (Vec a -> Int -> Prog (Vec a)) -> Prog (Vec a)
+accumVecFor n initial body =
+  Prog $ \k -> loopAccumVecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
+
+{-# INLINE accumIVecFor #-}
+accumIVecFor :: Int -> IVec -> (IVec -> Int -> Prog IVec) -> Prog IVec
+accumIVecFor n initial body =
+  Prog $ \k -> loopAccumIVecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
+
+{-# INLINE accumI32VecFor #-}
+accumI32VecFor :: Int -> I32Vec -> (I32Vec -> Int -> Prog I32Vec) -> Prog I32Vec
+accumI32VecFor n initial body =
+  Prog $ \k -> loopAccumI32VecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
+
+{-# INLINE accumDVecFor #-}
+accumDVecFor :: Int -> DVec -> (DVec -> Int -> Prog DVec) -> Prog DVec
+accumDVecFor n initial body =
+  Prog $ \k -> loopAccumDVecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
 
 {-# INLINE newAcc #-}
 newAcc :: Prim a => a -> (AccVar a -> Prog r) -> Prog r
@@ -1181,6 +1962,13 @@ mkReducerWith initial step merge done =
 {-# INLINE intSum #-}
 intSum :: Reducer Int
 intSum = mkReducerWith 0 step merge id
+  where
+    step !acc !x = acc + x
+    merge !left !right = left + right
+
+{-# INLINE int32Sum #-}
+int32Sum :: Reducer Int32
+int32Sum = mkReducerWith 0 step merge id
   where
     step !acc !x = acc + x
     merge !left !right = left + right

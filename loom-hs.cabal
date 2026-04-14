@@ -55,7 +55,11 @@ extra-source-files:
 -- extra-source-files:
 
 common warnings
-    ghc-options: -Wall
+    ghc-options: -Wall -fllvm
+    if os(darwin) && arch(aarch64)
+        ghc-options:
+            -pgmlo=/opt/homebrew/opt/llvm@16/bin/opt
+            -pgmlc=/opt/homebrew/opt/llvm@16/bin/llc
 
 library
     -- Import common warning flags.

@@ -4,6 +4,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, try)
 import Control.Monad (unless)
+import Data.Int (Int32)
 import GHC.Conc (getNumCapabilities)
 import Loom
 import qualified Loom.Polyhedral as Poly
@@ -11,6 +12,11 @@ import qualified Loom.Verify as Verify
 import qualified Loom.Verify.Polyhedral as VerifyPoly
 import Loom.Benchmark.Kernels
   ( runFill3DExample
+  , runInt32TiledMatMulScalarExample
+  , runInt32TiledMatMulVectorizedExample
+  , runDoubleMatMulExample
+  , runDoubleTiledMatMulScalarExample
+  , runDoubleTiledMatMulVectorizedExample
   , runMatMulExample
   , runPolyhedralTiledMatMulExample
   , runPolyhedralWavefrontEditDistanceExample
@@ -42,6 +48,8 @@ main = do
   testVerifiedWavefrontEditDistance
   testAccumFor
   testVecPrimitives
+  testVecPrimitivesInt32
+  testVecPrimitivesDouble
   testStripMine
   testParallelReducerScope
   testDynamicChunkedReducerScope
@@ -85,6 +93,8 @@ main = do
   testWavefrontPascal
   testWavefrontEditDistanceBenchmark
   testMatMulBenchmarkVectorized
+  testInt32MatMulBenchmarks
+  testDoubleMatMulBenchmarks
   putStrLn "All loom-hs tests passed."
 
 testArrayUpdate :: IO ()
@@ -422,6 +432,41 @@ testVecPrimitives = do
     vec <- readVec src 0
     pure (sumVec vec)
   assertEqual "vec reduction" 10 total
+
+testVecPrimitivesInt32 :: IO ()
+testVecPrimitivesInt32 = do
+  src <- fromList [1 .. 8 :: Int32]
+  out <- newArr 8
+  runProg $ do
+    left <- readVec src 0
+    right <- readVec src 4
+    wideLeft <- readI32Vec src 0
+    writeVec out 0 (addVec (mulVec left (broadcastVec 2)) (broadcastVec 1))
+    writeVec out 4 right
+    writeI32Vec out 4 (addI32Vec wideLeft (broadcastI32Vec 9))
+  xs <- toList out
+  assertEqual "vec primitives int32" [3, 5, 7, 9, 10, 11, 12, 13] xs
+  total <- runProg $ do
+    vec <- readVec src 0
+    wide <- readI32Vec src 0
+    pure (sumVec vec + sumI32Vec wide)
+  assertEqual "vec reduction int32" 20 total
+
+testVecPrimitivesDouble :: IO ()
+testVecPrimitivesDouble = do
+  src <- fromList [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5 :: Double]
+  out <- newArr 8
+  runProg $ do
+    left <- readVec src 0
+    right <- readVec src 4
+    writeVec out 0 (addVec (mulVec left (broadcastVec 2.0)) (broadcastVec 0.25))
+    writeVec out 4 (addVec right (broadcastVec 1.5))
+  xs <- toList out
+  assertApproxList "vec primitives double" 1.0e-12 [1.25, 3.25, 5.25, 7.25, 6.0, 7.0, 8.0, 9.0] xs
+  total <- runProg $ do
+    vec <- readVec src 0
+    pure (sumVec vec)
+  assertEqual "vec reduction double" 8.0 total
 
 testStripMine :: IO ()
 testStripMine = do
@@ -1035,10 +1080,40 @@ testMatMulBenchmarkVectorized = do
       [1 .. 16]
       [ 1, 0, 0, 0
       , 0, 1, 0, 0
-      , 0, 0, 1, 0
-      , 0, 0, 0, 1
-      ]
+       , 0, 0, 1, 0
+        , 0, 0, 0, 1
+        ]
   assertEqual "matmul benchmark vectorized" [1 .. 16] xs
+
+testInt32MatMulBenchmarks :: IO ()
+testInt32MatMulBenchmarks = do
+  let expected = [1 .. 16 :: Int32]
+      identity =
+        [ 1, 0, 0, 0
+        , 0, 1, 0, 0
+        , 0, 0, 1, 0
+        , 0, 0, 0, 1
+        ]
+  tiledScalar <- runInt32TiledMatMulScalarExample 4 expected identity
+  tiledVec <- runInt32TiledMatMulVectorizedExample 4 expected identity
+  assertEqual "int32 tiled matmul scalar" expected tiledScalar
+  assertEqual "int32 tiled matmul vec" expected tiledVec
+
+testDoubleMatMulBenchmarks :: IO ()
+testDoubleMatMulBenchmarks = do
+  let expected = [1 .. 16 :: Double]
+      identity =
+        [ 1, 0, 0, 0
+        , 0, 1, 0, 0
+        , 0, 0, 1, 0
+        , 0, 0, 0, 1
+        ]
+  scalar <- runDoubleMatMulExample 4 expected identity
+  tiledScalar <- runDoubleTiledMatMulScalarExample 4 expected identity
+  tiledVec <- runDoubleTiledMatMulVectorizedExample 4 expected identity
+  assertApproxList "double matmul scalar" 1.0e-12 expected scalar
+  assertApproxList "double tiled matmul scalar" 1.0e-12 expected tiledScalar
+  assertApproxList "double tiled matmul vec" 1.0e-12 expected tiledVec
 
 runAffineFill :: Affine2 -> IO [Int]
 runAffineFill transform = do

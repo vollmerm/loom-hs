@@ -10,6 +10,9 @@ module Loom
   , Affine2
   , Transform2D
   , Vec
+  , IVec
+  , I32Vec
+  , DVec
   , Prog
   , Reducer
   , RedVar
@@ -75,17 +78,39 @@ module Loom
   , tiledFor3D
   , stripMine
   , broadcastVec
+  , broadcastIVec
+  , broadcastI32Vec
+  , broadcastDVec
   , readArr
   , writeArr
   , readVec
+  , readIVec
+  , readI32Vec
+  , readDVec
   , writeVec
+  , writeIVec
+  , writeI32Vec
+  , writeDVec
   , addVec
+  , addIVec
+  , addI32Vec
+  , addDVec
   , mulVec
+  , mulIVec
+  , mulI32Vec
+  , mulDVec
   , sumVec
+  , sumIVec
+  , sumI32Vec
+  , sumDVec
   , newReducer
   , reduce
   , getReducer
   , accumFor
+  , accumVecFor
+  , accumIVecFor
+  , accumI32VecFor
+  , accumDVecFor
   , newAcc
   , readAcc
   , writeAcc
@@ -93,6 +118,7 @@ module Loom
   , mkReducer
   , mkReducerWith
   , intSum
+  , int32Sum
   , doubleSum
   ) where
 
