@@ -64,11 +64,13 @@ library
     -- Modules exported by the library.
     exposed-modules:
         Loom
+        Loom.Verify
         Loom.Polyhedral
 
     -- Modules included in this library but not exported.
     other-modules:
         Loom.Internal.Kernel
+        Loom.Internal.Verify
         Loom.Internal.Polyhedral
 
     -- LANGUAGE extensions used by modules in this package.

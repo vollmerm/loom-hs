@@ -7,6 +7,7 @@ import Control.Monad (unless)
 import GHC.Conc (getNumCapabilities)
 import Loom
 import qualified Loom.Polyhedral as Poly
+import qualified Loom.Verify as Verify
 import Loom.Benchmark.Kernels
   ( runMatMulExample
   , runPolyhedralTiledMatMulExample
@@ -24,6 +25,14 @@ main = do
   testAffine2Basics
   testShapeLoop1D
   testReducerSum
+  testVerifiedFill
+  testVerifiedMap
+  testVerifiedSum
+  testVerifiedDot
+  testVerifiedMatMul
+  testVerifiedShapeMismatch
+  testVerifiedReducerScope
+  testVerifiedThreePhaseNormalize
   testAccumFor
   testVecPrimitives
   testStripMine
@@ -113,6 +122,146 @@ testReducerSum = do
     foldFor intSum (sizeOfArr arr) $ \i ->
       readArr arr i
   assertEqual "reducer sum" 55 total
+
+testVerifiedFill :: IO ()
+testVerifiedFill = do
+  let shape = Verify.shape1 6
+  arr <- Verify.newArray shape
+  Verify.runProg $
+    Verify.parallel $
+      Verify.parFor1D shape $ \ctx ix ->
+        Verify.writeAt ctx arr ix (Verify.unIndex1 ix * 2)
+  xs <- Verify.toList arr
+  assertEqual "verified fill" [0, 2, 4, 6, 8, 10] xs
+
+testVerifiedMap :: IO ()
+testVerifiedMap = do
+  let shape = Verify.shape1 5
+  left <- Verify.fromList shape [1 .. 5 :: Int]
+  right <- Verify.fromList shape [10, 20, 30, 40, 50 :: Int]
+  out <- Verify.newArray shape
+  Verify.runProg $
+    Verify.parallel $
+      Verify.parFor1D shape $ \ctx ix -> do
+        x <- Verify.readAt ctx left ix
+        y <- Verify.readAt ctx right ix
+        Verify.writeAt ctx out ix (x + y)
+  xs <- Verify.toList out
+  assertEqual "verified map" [11, 22, 33, 44, 55] xs
+
+testVerifiedSum :: IO ()
+testVerifiedSum = do
+  let shape = Verify.shape1 10
+  arr <- Verify.fromList shape [1 .. 10 :: Int]
+  total <- Verify.runProg $
+    Verify.foldFor1D Verify.intSum shape $ \ix ->
+      Verify.readAt (Verify.rectAccess1D shape) arr ix
+  assertEqual "verified sum" 55 total
+
+testVerifiedDot :: IO ()
+testVerifiedDot = do
+  let shape = Verify.shape1 4
+  left <- Verify.fromList shape [1, 2, 3, 4 :: Int]
+  right <- Verify.fromList shape [5, 6, 7, 8 :: Int]
+  total <- Verify.runProg $
+    Verify.foldFor1D Verify.intSum shape $ \ix -> do
+      let ctx = Verify.rectAccess1D shape
+      x <- Verify.readAt ctx left ix
+      y <- Verify.readAt ctx right ix
+      pure (x * y)
+  assertEqual "verified dot" 70 total
+
+testVerifiedMatMul :: IO ()
+testVerifiedMatMul = do
+  let shape = Verify.shape2 4 4
+      kShape = Verify.shape1 4
+  left <- Verify.fromList shape [1 .. 16 :: Int]
+  right <-
+    Verify.fromList
+      shape
+      [ 1, 0, 0, 0
+      , 0, 1, 0, 0
+      , 0, 0, 1, 0
+      , 0, 0, 0, 1
+      ]
+  out <- Verify.newArray shape
+  Verify.runProg $
+    Verify.parallel $
+      Verify.parFor2D shape $ \ctx outIx -> do
+        let row = Verify.rowOf outIx
+            col = Verify.colOf outIx
+        total <-
+          Verify.foldFor1D Verify.intSum kShape $ \k -> do
+            lhs <- Verify.readAt ctx left (Verify.pairOf row k)
+            rhs <- Verify.readAt ctx right (Verify.pairOf k col)
+            pure (lhs * rhs)
+        Verify.writeAt ctx out outIx total
+  xs <- Verify.toList out
+  assertEqual "verified matmul" [1 .. 16] xs
+
+testVerifiedShapeMismatch :: IO ()
+testVerifiedShapeMismatch = do
+  let loopShape = Verify.shape1 3
+      arrShape = Verify.shape1 4
+  arr <- Verify.newArray arrShape
+  result <-
+    ( try $
+        Verify.runProg $
+          Verify.parallel $
+            Verify.parFor1D loopShape $ \ctx ix ->
+              Verify.writeAt ctx arr ix (0 :: Int)
+    ) ::
+      IO (Either SomeException ())
+  case result of
+    Left _ -> pure ()
+    Right _ -> error "verified shape mismatch should fail"
+
+testVerifiedReducerScope :: IO ()
+testVerifiedReducerScope = do
+  let shape = Verify.shape1 10
+  total <- Verify.runProg $
+    Verify.parallel $
+      Verify.newReducer Verify.intSum $ \sumVar -> do
+        Verify.parFor1D shape $ \_ ix ->
+          Verify.reduce sumVar (Verify.unIndex1 ix + 1)
+        Verify.barrier
+        Verify.parFor1D shape $ \_ ix ->
+          Verify.reduce sumVar (Verify.unIndex1 ix + 1)
+        Verify.getReducer sumVar
+  assertEqual "verified reducer scope" 110 total
+
+testVerifiedThreePhaseNormalize :: IO ()
+testVerifiedThreePhaseNormalize = do
+  let shape = Verify.shape1 4
+      input = [1.0, 2.0, 3.0, 4.0]
+      count = fromIntegral (Verify.extent1 shape)
+  src <- Verify.fromList shape input
+  out <- Verify.newArray shape
+  Verify.runProg $
+    Verify.parallel $
+      Verify.newReducer Verify.doubleSum $ \sumVar -> do
+        Verify.parFor1D shape $ \ctx ix -> do
+          x <- Verify.readAt ctx src ix
+          Verify.reduce sumVar x
+        total <- Verify.getReducer sumVar
+        Verify.barrier
+        let mean = total / count
+        Verify.newReducer Verify.doubleSum $ \sqVar -> do
+          Verify.parFor1D shape $ \ctx ix -> do
+            x <- Verify.readAt ctx src ix
+            let delta = x - mean
+            Verify.reduce sqVar (delta * delta)
+          sqTotal <- Verify.getReducer sqVar
+          Verify.barrier
+          let variance = sqTotal / count
+              invStd
+                | variance <= 0 = 0
+                | otherwise = 1 / sqrt variance
+          Verify.parFor1D shape $ \ctx ix -> do
+            x <- Verify.readAt ctx src ix
+            Verify.writeAt ctx out ix ((x - mean) * invStd)
+  xs <- Verify.toList out
+  assertApproxList "verified three-phase normalize" 1e-12 (expectedNormalized input) xs
 
 testAccumFor :: IO ()
 testAccumFor = do
