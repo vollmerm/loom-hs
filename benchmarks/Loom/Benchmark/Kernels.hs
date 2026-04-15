@@ -6,6 +6,7 @@ module Loom.Benchmark.Kernels
   , benchmarks
   , lookupBenchmark
   , runFill3DExample
+  , runNBodyExample
   , runInt32TiledMatMulScalarExample
   , runInt32TiledMatMulVectorizedExample
   , runDoubleMatMulExample
@@ -61,6 +62,14 @@ data DoubleUnaryEnv = DoubleUnaryEnv
   , doubleInput :: !(Arr Double)
   }
 
+data NBodyEnv = NBodyEnv
+  { nbodyCount :: !Int
+  , nbodyPosX :: !(Arr Double)
+  , nbodyPosY :: !(Arr Double)
+  , nbodyPosZ :: !(Arr Double)
+  , nbodyMass :: !(Arr Double)
+  }
+
 data DoubleMatrixEnv = DoubleMatrixEnv
   { doubleMatrixDim :: !Int
   , doubleMatrixLeft :: !(Arr Double)
@@ -80,6 +89,12 @@ data EditDistanceEnv = EditDistanceEnv
   , editRight :: !(Arr Int)
   }
 
+data Force3 =
+  Force3
+    {-# UNPACK #-} !Double
+    {-# UNPACK #-} !Double
+    {-# UNPACK #-} !Double
+
 benchmarks :: [Benchmark]
 benchmarks =
   [ Benchmark "fill" "parallel 1D fill into a fresh array" 1000000 setupFill runFill
@@ -87,6 +102,7 @@ benchmarks =
   , Benchmark "map" "parallel 1D elementwise map over two inputs" 1000000 setupBinaryVector runMap
   , Benchmark "sum" "parallel reduction over one vector" 1000000 setupUnaryVector runSum
   , Benchmark "dot" "parallel dot product over two vectors" 1000000 setupBinaryVector runDot
+  , Benchmark "nbody" "parallel softened all-pairs n-body force accumulation with SoA layout and source tiling" 2048 setupNBody runNBody
   , Benchmark "matmul" "parallel square matrix multiply" 256 setupMatrix runMatMul
   , Benchmark "tiled-matmul" "parallel square matrix multiply with tiled traversal" 256 setupMatrix runTiledMatMul
   , Benchmark "int32-tiled-matmul-scalar" "parallel square Int32 matrix multiply with tiling and scalar inner loops" 256 setupInt32Matrix runInt32TiledMatMulScalar
@@ -138,6 +154,14 @@ setupDoubleVector n = do
   xs <- seededDoubleVector n 17 11
   pure (DoubleUnaryEnv n xs)
 
+setupNBody :: Int -> IO NBodyEnv
+setupNBody n = do
+  posX <- seededSignedDoubleVector n 17 11
+  posY <- seededSignedDoubleVector n 31 7
+  posZ <- seededSignedDoubleVector n 43 3
+  mass <- seededPositiveDoubleVector n 29 5
+  pure (NBodyEnv n posX posY posZ mass)
+
 setupDoubleMatrix :: Int -> IO DoubleMatrixEnv
 setupDoubleMatrix n = do
   a <- seededDoubleVector (n * n) 17 11
@@ -169,6 +193,26 @@ seededDoubleVector n stride offset =
     [ fromIntegral (((i * stride) + offset) `mod` 257) / 257.0
     | i <- [0 .. n - 1]
     ]
+
+seededSignedDoubleVector :: Int -> Int -> Int -> IO (Arr Double)
+seededSignedDoubleVector n stride offset =
+  fromList
+    [ (2.0 * unitSeed i) - 1.0
+    | i <- [0 .. n - 1]
+    ]
+  where
+    unitSeed i =
+      fromIntegral (((i * stride) + offset) `mod` 1021) / 1021.0
+
+seededPositiveDoubleVector :: Int -> Int -> Int -> IO (Arr Double)
+seededPositiveDoubleVector n stride offset =
+  fromList
+    [ 0.5 + unitSeed i
+    | i <- [0 .. n - 1]
+    ]
+  where
+    unitSeed i =
+      fromIntegral (((i * stride) + offset) `mod` 1021) / 1021.0
 
 seededInt32Vector :: Int -> Int -> Int -> IO (Arr Int32)
 seededInt32Vector n stride offset =
@@ -229,6 +273,23 @@ runDot env =
           y <- readArr (binaryRight env) i
           reduce sumVar (x * y)
         getReducer sumVar
+
+runNBody :: NBodyEnv -> IO Int
+runNBody env = do
+  let n = nbodyCount env
+  accX <- newArr n
+  accY <- newArr n
+  accZ <- newArr n
+  runNBodyKernel
+    n
+    (nbodyPosX env)
+    (nbodyPosY env)
+    (nbodyPosZ env)
+    (nbodyMass env)
+    accX
+    accY
+    accZ
+  sampleDoubleTriples accX accY accZ n
 
 runMatMul :: MatrixEnv -> IO Int
 runMatMul env = do
@@ -326,6 +387,23 @@ runDoubleTiledMatMulVectorizedExample n xs ys = do
   out <- newArr (n * n)
   runDoubleTiledMatMulVectorizedKernel n left right out
   toList out
+
+runNBodyExample :: [Double] -> [Double] -> [Double] -> [Double] -> IO [Double]
+runNBodyExample posX posY posZ mass
+  | length posY /= n || length posZ /= n || length mass /= n =
+      error "runNBodyExample: mismatched input lengths"
+  | otherwise = do
+      xs <- fromList posX
+      ys <- fromList posY
+      zs <- fromList posZ
+      ms <- fromList mass
+      outX <- newArr n
+      outY <- newArr n
+      outZ <- newArr n
+      runNBodyKernel n xs ys zs ms outX outY outZ
+      interleave3 <$> toList outX <*> toList outY <*> toList outZ
+  where
+    n = length posX
 
 runFill3DExample :: Int -> IO [Int]
 runFill3DExample n = do
@@ -531,6 +609,87 @@ runDoubleTiledMatMulVectorizedKernel n left right out =
             (\j -> writeMatMulScalarCellDouble n left right out i (col0 + j))
   where
     tile = max 1 (min 32 n)
+
+runNBodyKernel ::
+  Int ->
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  IO ()
+runNBodyKernel n posX posY posZ mass accX accY accZ =
+  runProg $
+    parallel $
+      parFor n $ \i -> do
+        xi <- readArr posX i
+        yi <- readArr posY i
+        zi <- readArr posZ i
+        let fullTiles = n `quot` sourceTile
+            tailStart = fullTiles * sourceTile
+            tailCount = n - tailStart
+        fullForce <-
+          accumFor fullTiles zeroForce $ \acc tileIdx -> do
+            let j0 = tileIdx * sourceTile
+            tileForce <-
+              accumFor sourceTile zeroForce $ \partial off ->
+                accumulateNBodyForce posX posY posZ mass i xi yi zi partial (j0 + off)
+            pure (addForce3 acc tileForce)
+        Force3 ax ay az <-
+          accumFor tailCount fullForce $ \acc off ->
+            accumulateNBodyForce posX posY posZ mass i xi yi zi acc (tailStart + off)
+        writeArr accX i ax
+        writeArr accY i ay
+        writeArr accZ i az
+  where
+    sourceTile = max 1 (min 64 n)
+
+{-# INLINE zeroForce #-}
+zeroForce :: Force3
+zeroForce = Force3 0.0 0.0 0.0
+
+{-# INLINE addForce3 #-}
+addForce3 :: Force3 -> Force3 -> Force3
+addForce3 (Force3 ax ay az) (Force3 bx by bz) =
+  Force3 (ax + bx) (ay + by) (az + bz)
+
+{-# INLINE accumulateNBodyForce #-}
+accumulateNBodyForce ::
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  Int ->
+  Double ->
+  Double ->
+  Double ->
+  Force3 ->
+  Int ->
+  Prog Force3
+accumulateNBodyForce posX posY posZ mass i xi yi zi (Force3 ax ay az) j
+  | i == j = pure (Force3 ax ay az)
+  | otherwise = do
+      xj <- readArr posX j
+      yj <- readArr posY j
+      zj <- readArr posZ j
+      mj <- readArr mass j
+      let dx = xj - xi
+          dy = yj - yi
+          dz = zj - zi
+          distSq = (dx * dx) + (dy * dy) + (dz * dz) + nbodySoftening
+          invDist = 1.0 / sqrt distSq
+          scale = mj * invDist * invDist * invDist
+      pure
+        ( Force3
+            (ax + (dx * scale))
+            (ay + (dy * scale))
+            (az + (dz * scale))
+        )
+
+nbodySoftening :: Double
+nbodySoftening = 1.0e-9
 
 {-# INLINE writeMatMulVecChunk #-}
 writeMatMulVecChunk :: Int -> Arr Int -> Arr Int -> Arr Int -> Int -> Int -> Prog ()
@@ -831,3 +990,25 @@ sampleDoubleVector arr n = do
   middle <- readArrIO arr (n `quot` 2)
   lastValue <- readArrIO arr (n - 1)
   pure (round ((first + middle + lastValue) * 1000))
+
+sampleDoubleTriples :: Arr Double -> Arr Double -> Arr Double -> Int -> IO Int
+sampleDoubleTriples arrX arrY arrZ n = do
+  x0 <- readArrIO arrX 0
+  y0 <- readArrIO arrY 0
+  z0 <- readArrIO arrZ 0
+  xm <- readArrIO arrX mid
+  ym <- readArrIO arrY mid
+  zm <- readArrIO arrZ mid
+  xN <- readArrIO arrX (n - 1)
+  yN <- readArrIO arrY (n - 1)
+  zN <- readArrIO arrZ (n - 1)
+  pure (round ((x0 + y0 + z0 + xm + ym + zm + xN + yN + zN) * 1000))
+  where
+    mid = n `quot` 2
+
+interleave3 :: [Double] -> [Double] -> [Double] -> [Double]
+interleave3 [] [] [] = []
+interleave3 (x : xs) (y : ys) (z : zs) =
+  x : y : z : interleave3 xs ys zs
+interleave3 _ _ _ =
+  error "interleave3: mismatched input lengths"

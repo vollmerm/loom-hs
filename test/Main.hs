@@ -12,12 +12,13 @@ import qualified Loom.Verify as Verify
 import qualified Loom.Verify.Polyhedral as VerifyPoly
 import Loom.Benchmark.Kernels
   ( runFill3DExample
-  , runInt32TiledMatMulScalarExample
-  , runInt32TiledMatMulVectorizedExample
   , runDoubleMatMulExample
   , runDoubleTiledMatMulScalarExample
   , runDoubleTiledMatMulVectorizedExample
+  , runInt32TiledMatMulScalarExample
+  , runInt32TiledMatMulVectorizedExample
   , runMatMulExample
+  , runNBodyExample
   , runPolyhedralTiledMatMulExample
   , runPolyhedralWavefrontEditDistanceExample
   , runRedBlackStencilExample
@@ -95,6 +96,7 @@ main = do
   testMatMulBenchmarkVectorized
   testInt32MatMulBenchmarks
   testDoubleMatMulBenchmarks
+  testNBodyBenchmark
   putStrLn "All loom-hs tests passed."
 
 testArrayUpdate :: IO ()
@@ -1114,6 +1116,56 @@ testDoubleMatMulBenchmarks = do
   assertApproxList "double matmul scalar" 1.0e-12 expected scalar
   assertApproxList "double tiled matmul scalar" 1.0e-12 expected tiledScalar
   assertApproxList "double tiled matmul vec" 1.0e-12 expected tiledVec
+
+testNBodyBenchmark :: IO ()
+testNBodyBenchmark = do
+  let posX = [-1.0, 0.25, 1.5, -0.75]
+      posY = [0.0, 1.0, -0.5, 0.5]
+      posZ = [0.5, -1.25, 0.25, 1.5]
+      mass = [1.5, 0.75, 2.0, 1.25]
+      expected = referenceNBody posX posY posZ mass
+  actual <- runNBodyExample posX posY posZ mass
+  assertApproxList "nbody benchmark" 1.0e-12 expected actual
+
+referenceNBody :: [Double] -> [Double] -> [Double] -> [Double] -> [Double]
+referenceNBody posX posY posZ mass =
+  concat
+    [ [sum [forceX i j | j <- [0 .. n - 1]], sum [forceY i j | j <- [0 .. n - 1]], sum [forceZ i j | j <- [0 .. n - 1]]]
+    | i <- [0 .. n - 1]
+    ]
+  where
+    n = length posX
+    softening = 1.0e-9
+    forceX i j
+      | i == j = 0.0
+      | otherwise = dx * scale
+      where
+        dx = posX !! j - posX !! i
+        dy = posY !! j - posY !! i
+        dz = posZ !! j - posZ !! i
+        distSq = (dx * dx) + (dy * dy) + (dz * dz) + softening
+        invDist = 1.0 / sqrt distSq
+        scale = (mass !! j) * invDist * invDist * invDist
+    forceY i j
+      | i == j = 0.0
+      | otherwise = dy * scale
+      where
+        dx = posX !! j - posX !! i
+        dy = posY !! j - posY !! i
+        dz = posZ !! j - posZ !! i
+        distSq = (dx * dx) + (dy * dy) + (dz * dz) + softening
+        invDist = 1.0 / sqrt distSq
+        scale = (mass !! j) * invDist * invDist * invDist
+    forceZ i j
+      | i == j = 0.0
+      | otherwise = dz * scale
+      where
+        dx = posX !! j - posX !! i
+        dy = posY !! j - posY !! i
+        dz = posZ !! j - posZ !! i
+        distSq = (dx * dx) + (dy * dy) + (dz * dz) + softening
+        invDist = 1.0 / sqrt distSq
+        scale = (mass !! j) * invDist * invDist * invDist
 
 runAffineFill :: Affine2 -> IO [Int]
 runAffineFill transform = do
