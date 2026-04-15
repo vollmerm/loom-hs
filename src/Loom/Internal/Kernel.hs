@@ -170,6 +170,7 @@ import Control.Exception (SomeException, bracket, throwIO, try)
 import Control.Monad (ap)
 import Control.Monad.Primitive (primitive)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.List (intercalate, sort)
 import Data.Primitive.Array
   ( MutableArray
   , newArray
@@ -2507,13 +2508,6 @@ columnsOf rows@(row0 : _)
   | otherwise =
       error "columnsOf requires rectangular matrices"
 
-{-# INLINE affineInputRank #-}
-affineInputRank :: AffineN -> Int
-affineInputRank (AffineN rows _) =
-  case rows of
-    [] -> 0
-    row0 : _ -> length row0
-
 rectCornersN :: RectN -> [[Int]]
 rectCornersN rect@(RectN lo hi)
   | isEmptyRectN rect = []
@@ -2521,26 +2515,12 @@ rectCornersN rect@(RectN lo hi)
       sequence [[lower, upper - 1] | (lower, upper) <- zip lo hi]
 
 renderIntList :: [Int] -> String
-renderIntList =
-  foldr
-    (\x acc -> if null acc then show x else show x ++ "," ++ acc)
-    ""
+renderIntList xs =
+  intercalate "," (map show xs)
 
 isPermutation :: [Int] -> Bool
 isPermutation xs =
-  let sorted = sortIntList xs
-   in sorted == [0 .. length xs - 1]
-
-sortIntList :: [Int] -> [Int]
-sortIntList [] = []
-sortIntList (x : xs) =
-  insertSorted x (sortIntList xs)
-
-insertSorted :: Int -> [Int] -> [Int]
-insertSorted x [] = [x]
-insertSorted x ys@(y : rest)
-  | x <= y = x : ys
-  | otherwise = y : insertSorted x rest
+  sort xs == [0 .. length xs - 1]
 
 invertIntegerMatrix :: [[Int]] -> Maybe [[Int]]
 invertIntegerMatrix rows
@@ -2810,15 +2790,14 @@ flushAffineStageN (Just affine) acc
 
 {-# INLINE isIdentityAffineN #-}
 isIdentityAffineN :: AffineN -> Bool
-isIdentityAffineN affine =
-  all
-    (\point -> unIxN (applyAffineN affine (IxN point)) == point)
-    samplePoints
+isIdentityAffineN (AffineN rows offset) =
+  offset == replicate rank 0 && rows == identityRows
   where
-    rank = affineInputRank affine
-    samplePoints =
-      replicate rank 0
-        : [[if i == axis then 1 else 0 | i <- [0 .. rank - 1]] | axis <- [0 .. rank - 1]]
+    rank = length rows
+    identityRows =
+      [ [if i == j then 1 else 0 | j <- [0 .. rank - 1]]
+      | i <- [0 .. rank - 1]
+      ]
 
 data StructuredAffine2D
   = StructuredIdentity
