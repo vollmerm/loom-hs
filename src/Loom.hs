@@ -1,9 +1,7 @@
-{-# LANGUAGE GADTs #-}
-
 module Loom
   ( Arr
   , Index
-  , Loop
+  , Domain
   , Schedule
   , Vec
   , IVec
@@ -13,12 +11,12 @@ module Loom
   , Reducer
   , RedVar
   , AccVar
-  , range
-  , grid
-  , grid2
-  , grid3
-  , scheduled
-  , for
+  , shape
+  , withSchedule
+  , forEach
+  , for1
+  , for2
+  , for3
   , coords
   , linearIndex
   , newArr
@@ -108,12 +106,8 @@ import Loom.Internal.Kernel
   , getReducer
   , int32Sum
   , intSum
-  , mkReducer
-  , mkReducerWith
-  , mulDVec
-  , mulI32Vec
-  , mulIVec
-  , mulVec
+  , indexN
+  , ixN
   , newAcc
   , newArr
   , newReducer
@@ -122,6 +116,7 @@ import Loom.Internal.Kernel
   , parFor3
   , parForScheduleN
   , parForShN
+  , parForTransform2D
   , parallel
   , readAcc
   , readArr
@@ -133,6 +128,8 @@ import Loom.Internal.Kernel
   , reduce
   , runProg
   , shN
+  , sh2
+  , sh3
   , sizeOfArr
   , stripMine
   , sumDVec
@@ -141,6 +138,7 @@ import Loom.Internal.Kernel
   , sumVec
   , toList
   , unIxN
+  , withIx2
   , vecWidth
   , writeAcc
   , writeArr
@@ -149,49 +147,97 @@ import Loom.Internal.Kernel
   , writeI32Vec
   , writeIVec
   , writeVec
-  , indexN
+  , mkReducer
+  , mkReducerWith
+  , mulDVec
+  , mulI32Vec
+  , mulIVec
+  , mulVec
+  , tiledFor3D
   )
-import qualified Loom.Schedule as Schedule
+import qualified Loom.Internal.Schedule as InternalSchedule
 import Loom.Schedule (Schedule)
 
 type Index = IxN
 
-data Loop ix where
-  Range :: !Int -> Loop Int
-  Grid2 :: !Int -> !Int -> Loop (Int, Int)
-  Grid3 :: !Int -> !Int -> !Int -> Loop (Int, Int, Int)
-  GridN :: [Int] -> Loop Index
-  Scheduled :: !Schedule -> Loop ix -> Loop ix
+data Domain = Domain ![Int] !(Maybe Schedule)
 
-range :: Int -> Loop Int
-range = Range
-{-# INLINE range #-}
+shape :: [Int] -> Domain
+shape dims = Domain dims Nothing
+{-# INLINE shape #-}
 
-grid :: [Int] -> Loop Index
-grid = GridN
-{-# INLINE grid #-}
+infixl 5 `withSchedule`
 
-grid2 :: Int -> Int -> Loop (Int, Int)
-grid2 = Grid2
-{-# INLINE grid2 #-}
+withSchedule :: Domain -> Schedule -> Domain
+withSchedule (Domain dims maybeSchedule) schedule =
+  Domain dims (Just combined)
+  where
+    combined =
+      case maybeSchedule of
+        Nothing -> schedule
+        Just current -> InternalSchedule.compose current schedule
+{-# INLINE withSchedule #-}
 
-grid3 :: Int -> Int -> Int -> Loop (Int, Int, Int)
-grid3 = Grid3
-{-# INLINE grid3 #-}
+forEach :: Domain -> (Index -> Prog ()) -> Prog ()
+forEach (Domain dims maybeSchedule) body =
+  case (dims, maybeSchedule) of
+    ([n], Nothing) ->
+      parFor n (\i -> body (index1 i))
+    ([rows, cols], Nothing) ->
+      parFor2 rows cols (\i j -> body (index2 i j))
+    ([depth, rows, cols], Nothing) ->
+      parFor3 depth rows cols (\i j k -> body (index3 i j k))
+    ([rows, cols], Just schedule) ->
+      case InternalSchedule.compileSchedule2D schedule of
+        Just transform ->
+          parForTransform2D transform (sh2 rows cols) (\ix -> withIx2 ix (\i j -> body (index2 i j)))
+        Nothing ->
+          parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
+    ([depth, rows, cols], Just schedule) ->
+      case InternalSchedule.tileSchedule3D schedule of
+        Just (tileDepth, tileRows, tileCols) ->
+          tiledFor3D tileDepth tileRows tileCols (sh3 depth rows cols) (\i j k -> body (index3 i j k))
+        Nothing ->
+          parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
+    (_, Just schedule) ->
+      parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
+    _ ->
+      parForShN (shN dims) body
+{-# INLINE forEach #-}
 
-scheduled :: Schedule -> Loop ix -> Loop ix
-scheduled = Scheduled
-{-# INLINE scheduled #-}
+for1 :: Int -> Schedule -> (Int -> Prog ()) -> Prog ()
+for1 n schedule body =
+  if InternalSchedule.isIdentitySchedule schedule
+    then parFor n body
+    else forScheduled [n] schedule $ \ix ->
+      withIndex1 "for1" ix body
+{-# INLINE for1 #-}
 
-for :: Loop ix -> (ix -> Prog ()) -> Prog ()
-for loop body =
-  case loop of
-    Range n -> parFor n body
-    Grid2 rows cols -> parFor2 rows cols (\i j -> body (i, j))
-    Grid3 depth rows cols -> parFor3 depth rows cols (\i j k -> body (i, j, k))
-    GridN dims -> parForShN (shN dims) body
-    Scheduled sched inner -> forScheduled sched inner body
-{-# INLINE for #-}
+for2 :: Int -> Int -> Schedule -> (Int -> Int -> Prog ()) -> Prog ()
+for2 rows cols schedule body =
+  if InternalSchedule.isIdentitySchedule schedule
+    then parFor2 rows cols body
+    else
+      case InternalSchedule.compileSchedule2D schedule of
+        Just transform ->
+          parForTransform2D transform (sh2 rows cols) (\ix -> withIx2 ix body)
+        Nothing ->
+          forScheduled [rows, cols] schedule $ \ix ->
+            withIndex2 "for2" ix body
+{-# INLINE for2 #-}
+
+for3 :: Int -> Int -> Int -> Schedule -> (Int -> Int -> Int -> Prog ()) -> Prog ()
+for3 depth rows cols schedule body =
+  if InternalSchedule.isIdentitySchedule schedule
+    then parFor3 depth rows cols body
+    else
+      case InternalSchedule.tileSchedule3D schedule of
+        Just (tileDepth, tileRows, tileCols) ->
+          tiledFor3D tileDepth tileRows tileCols (sh3 depth rows cols) body
+        Nothing ->
+          forScheduled [depth, rows, cols] schedule $ \ix ->
+            withIndex3 "for3" ix body
+{-# INLINE for3 #-}
 
 coords :: Index -> [Int]
 coords = unIxN
@@ -201,26 +247,52 @@ linearIndex :: [Int] -> Index -> Int
 linearIndex dims = indexN (shN dims)
 {-# INLINE linearIndex #-}
 
-forScheduled :: Schedule -> Loop ix -> (ix -> Prog ()) -> Prog ()
-forScheduled sched loop body =
-  case loop of
-    Range n ->
-      parForScheduleN sched (shN [n]) $ \ix ->
-        case unIxN ix of
-          [i] -> body i
-          coords' -> error ("Loom.for: expected a 1D scheduled index, got " <> show coords')
-    Grid2 rows cols ->
-      parForScheduleN sched (shN [rows, cols]) $ \ix ->
-        case unIxN ix of
-          [i, j] -> body (i, j)
-          coords' -> error ("Loom.for: expected a 2D scheduled index, got " <> show coords')
-    Grid3 depth rows cols ->
-      parForScheduleN sched (shN [depth, rows, cols]) $ \ix ->
-        case unIxN ix of
-          [i, j, k] -> body (i, j, k)
-          coords' -> error ("Loom.for: expected a 3D scheduled index, got " <> show coords')
-    GridN dims ->
-      parForScheduleN sched (shN dims) body
-    Scheduled innerSched inner ->
-      forScheduled (Schedule.compose innerSched sched) inner body
+forScheduled :: [Int] -> Schedule -> (Index -> Prog ()) -> Prog ()
+forScheduled dims schedule =
+  forEach (shape dims `withSchedule` schedule)
 {-# INLINE forScheduled #-}
+
+withIndex1 :: String -> Index -> (Int -> Prog ()) -> Prog ()
+withIndex1 caller ix body =
+  case coords ix of
+    [i] -> body i
+    coords' -> badIndex caller 1 coords'
+{-# INLINE withIndex1 #-}
+
+withIndex2 :: String -> Index -> (Int -> Int -> Prog ()) -> Prog ()
+withIndex2 caller ix body =
+  case coords ix of
+    [i, j] -> body i j
+    coords' -> badIndex caller 2 coords'
+{-# INLINE withIndex2 #-}
+
+withIndex3 :: String -> Index -> (Int -> Int -> Int -> Prog ()) -> Prog ()
+withIndex3 caller ix body =
+  case coords ix of
+    [i, j, k] -> body i j k
+    coords' -> badIndex caller 3 coords'
+{-# INLINE withIndex3 #-}
+
+badIndex :: String -> Int -> [Int] -> Prog a
+badIndex caller rank coords' =
+  error
+    ( "Loom."
+        ++ caller
+        ++ ": expected a "
+        ++ show rank
+        ++ "D index, got "
+        ++ show coords'
+    )
+{-# INLINE badIndex #-}
+
+index1 :: Int -> Index
+index1 i = ixN [i]
+{-# INLINE index1 #-}
+
+index2 :: Int -> Int -> Index
+index2 i j = ixN [i, j]
+{-# INLINE index2 #-}
+
+index3 :: Int -> Int -> Int -> Index
+index3 i j k = ixN [i, j, k]
+{-# INLINE index3 #-}

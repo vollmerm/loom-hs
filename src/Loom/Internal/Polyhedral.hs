@@ -37,7 +37,7 @@ module Loom.Internal.Polyhedral
   , lowerKernel2D
   ) where
 
-import Data.List (intercalate, sortOn)
+import Data.List (intercalate, sort, sortOn)
 import Loom.Internal.Kernel
   ( Affine2
   , AffineN
@@ -186,7 +186,7 @@ renderAffineExpr :: AffineExpr -> String
 renderAffineExpr (AffineExpr coeffs offset) =
   case filter (/= "") (map renderTerm coeffs ++ [renderOffset offset]) of
     [] -> "0"
-    firstTerm : restTerms -> foldl' (\acc term -> acc ++ renderJoin term ++ stripSign term) firstTerm restTerms
+    firstTerm : restTerms -> concat (firstTerm : map renderFollowing restTerms)
   where
     renderTerm (_, 0) = ""
     renderTerm (var, 1) = renderVar var
@@ -198,6 +198,8 @@ renderAffineExpr (AffineExpr coeffs offset) =
 
     renderJoin ('-' : _) = " - "
     renderJoin _ = " + "
+
+    renderFollowing term = renderJoin term ++ stripSign term
 
     stripSign ('-' : xs) = xs
     stripSign xs = xs
@@ -377,7 +379,7 @@ ensureLegalPhase2D phaseAnalysis =
     IllegalTransform2D message ->
       Left (IllegalDependence2D (phaseNameText ++ " is illegal: " ++ message))
   where
-    phaseNameText = "phase " ++ phaseSummaryName (phaseAnalysisSummary phaseAnalysis)
+    phaseNameText = phaseSummaryLabel (phaseAnalysisSummary phaseAnalysis)
 
 collapseKernelLegality2D :: KernelAnalysis2D -> Legality2D
 collapseKernelLegality2D analysis =
@@ -444,13 +446,19 @@ collapseKernelLegality2D analysis =
 
 phaseIssueText :: PhaseAnalysis2D -> String -> String
 phaseIssueText phaseAnalysis suffix =
-  "phase " ++ phaseSummaryName (phaseAnalysisSummary phaseAnalysis) ++ " " ++ suffix
+  phaseSummaryLabel (phaseAnalysisSummary phaseAnalysis) ++ " " ++ suffix
+
+phaseSummaryLabel :: PhaseSummary2D -> String
+phaseSummaryLabel summary =
+  case phaseSummaryName summary of
+    "" -> "phase"
+    name -> "phase " ++ name
 
 uniqueNames :: [[String]] -> [String]
 uniqueNames = dedupeSorted . concat
 
 dedupeSorted :: [String] -> [String]
-dedupeSorted = go . sortOn id
+dedupeSorted = go . sort
   where
     go [] = []
     go (x : xs) = x : go (dropWhile (== x) xs)
@@ -521,24 +529,13 @@ summarizeSchedule2D stages =
 
 ambiguousHazardArrays2D :: PhaseSummary2D -> [String]
 ambiguousHazardArrays2D summary =
-  deduplicateStrings
+  dedupeSorted
     [ accessArray writeAccess
     | writeAccess <- phaseSummaryWrites summary
     , otherAccess <- phaseSummaryReads summary ++ phaseSummaryWrites summary
     , accessArray writeAccess == accessArray otherAccess
     , accessIndex writeAccess /= accessIndex otherAccess
     ]
-
-deduplicateStrings :: [String] -> [String]
-deduplicateStrings =
-  foldr
-    (\x acc -> case acc of
-        y : _
-          | x == y -> acc
-        _ -> x : acc
-    )
-    []
-    . sortOn id
 
 lowerPhase2D :: Sh2 -> PhaseSummary2D -> (Int -> Int -> Prog ()) -> Prog ()
 lowerPhase2D shape phaseSummary body =

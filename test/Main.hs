@@ -17,6 +17,7 @@ import Loom.Benchmark.Kernels
   , runDoubleMatMulExample
   , runDoubleTiledMatMulScalarExample
   , runDoubleTiledMatMulVectorizedExample
+  , runDoubleTiledMatMulVectorizedNewApiExample
   , runInt32TiledMatMulScalarExample
   , runInt32TiledMatMulVectorizedExample
   , runJacobi1DExample
@@ -39,6 +40,7 @@ main = do
   testAffine2Basics
   testAffineNBasics
   testShapeLoop1D
+  testShapeLoop2DScheduled
   testShapeLoop3D
   testShapeLoopND
   testRectLoopND
@@ -121,7 +123,7 @@ testArrayUpdate :: IO ()
 testArrayUpdate = do
   arr <- fromList [1, 2, 3, 4 :: Int]
   runProg $
-    for (range (sizeOfArr arr)) $ \i -> do
+    for1 (sizeOfArr arr) Schedule.identity $ \i -> do
       x <- readArr arr i
       writeArr arr i (x + 1)
   xs <- toList arr
@@ -138,13 +140,13 @@ testIndexHelpers = do
 
 testIndexHelpersN :: IO ()
 testIndexHelpersN = do
-  let shape = shN [2, 3, 4, 5]
+  let ndShape = shN [2, 3, 4, 5]
       ix = ixN [1, 2, 3, 4]
       rect = rectN [1, 0, 2] [3, 4, 5]
   assertEqual "unIxN" [1, 2, 3, 4] (unIxN ix)
-  assertEqual "unShN" [2, 3, 4, 5] (unShN shape)
+  assertEqual "unShN" [2, 3, 4, 5] (unShN ndShape)
   assertEqual "unRectN" ([1, 0, 2], [3, 4, 5]) (unRectN rect)
-  assertEqual "indexN" 119 (indexN shape ix)
+  assertEqual "indexN" 119 (indexN ndShape ix)
 
 testAffine2Basics :: IO ()
 testAffine2Basics = do
@@ -181,10 +183,26 @@ testShapeLoop1D :: IO ()
 testShapeLoop1D = do
   arr <- newArr 6
   runProg $
-    for (range 6) $ \i ->
+    for1 6 Schedule.identity $ \i ->
       writeArr arr i (i * 2)
   xs <- toList arr
   assertEqual "shape loop 1d" [0, 2, 4, 6, 8, 10] xs
+
+testShapeLoop2DScheduled :: IO ()
+testShapeLoop2DScheduled = do
+  let rows = 3
+      cols = 4
+      schedule = Schedule.tile2 2 3 Schedule.>>> Schedule.interchange
+  arr <- newArr (rows * cols)
+  runProg $
+    parallel $
+      for2 rows cols schedule $ \i j ->
+        writeArr arr (i * cols + j) (i * 10 + j)
+  xs <- toList arr
+  assertEqual
+    "shape loop 2d scheduled"
+    [i * 10 + j | i <- [0 .. rows - 1], j <- [0 .. cols - 1]]
+    xs
 
 testShapeLoop3D :: IO ()
 testShapeLoop3D = do
@@ -194,7 +212,7 @@ testShapeLoop3D = do
   arr <- newArr (depth * rows * cols)
   runProg $
     parallel $
-      for (grid3 depth rows cols) $ \(i, j, k) ->
+      for3 depth rows cols Schedule.identity $ \i j k ->
         writeArr arr ((i * rows * cols) + (j * cols) + k) (i * 100 + j * 10 + k)
   xs <- toList arr
   assertEqual
@@ -214,14 +232,14 @@ testShapeLoopND = do
         ]
   arr <- newArr (length expected)
   runProg $
-    for (grid dims) $ \ix ->
+    forEach (shape dims) $ \ix ->
       writeArr arr (linearIndex dims ix) (encodeIxN (coords ix))
   xs <- toList arr
   assertEqual "shape loop nd" expected xs
 
 testRectLoopND :: IO ()
 testRectLoopND = do
-  let shape = shN [4, 5, 3, 2]
+  let ndShape = shN [4, 5, 3, 2]
       rect = rectN [1, 2, 1, 0] [3, 5, 3, 2]
       expected =
         [ if i >= 1 && i < 3 && j >= 2 && j < 5 && k >= 1 && k < 3
@@ -232,10 +250,10 @@ testRectLoopND = do
         , k <- [0 .. 2]
         , l <- [0 .. 1]
         ]
-  arr <- newArr (product (unShN shape))
+  arr <- newArr (product (unShN ndShape))
   runProg $
     parForRectN rect $ \ix ->
-      writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+      writeArr arr (indexN ndShape ix) (encodeIxN (unIxN ix))
   xs <- toList arr
   assertEqual "rect loop nd" expected xs
 
@@ -252,7 +270,7 @@ testTiledLoopND = do
         ]
   arr <- newArr (length expected)
   runProg $
-    for (scheduled (Schedule.tile tileShape) (grid dims)) $ \ix ->
+    forEach (shape dims `withSchedule` Schedule.tile tileShape) $ \ix ->
       writeArr arr (linearIndex dims ix) (encodeIxN (coords ix))
   xs <- toList arr
   assertEqual "tiled loop nd" expected xs
@@ -267,22 +285,22 @@ testReducerSum = do
 
 testVerifiedFill :: IO ()
 testVerifiedFill = do
-  let shape = Verify.shape1 6
-  arr <- Verify.newArray shape
+  let verifiedShape = Verify.shape1 6
+  arr <- Verify.newArray verifiedShape
   Verify.runProg $
     Verify.parallel $
-      Verify.parFor1D shape $ \ctx ix ->
+      Verify.parFor1D verifiedShape $ \ctx ix ->
         Verify.writeAt ctx arr ix (Verify.unIndex1 ix * 2)
   xs <- Verify.toList arr
   assertEqual "verified fill" [0, 2, 4, 6, 8, 10] xs
 
 testVerifiedFill3D :: IO ()
 testVerifiedFill3D = do
-  let shape = Verify.shape3 2 3 4
-  arr <- Verify.newArray shape
+  let verifiedShape = Verify.shape3 2 3 4
+  arr <- Verify.newArray verifiedShape
   Verify.runProg $
     Verify.parallel $
-      Verify.parFor3D shape $ \ctx ix ->
+      Verify.parFor3D verifiedShape $ \ctx ix ->
         case Verify.unIndex3 ix of
           (i, j, k) ->
             Verify.writeAt ctx arr ix (i * 100 + j * 10 + k)
@@ -294,11 +312,11 @@ testVerifiedFill3D = do
 
 testVerifiedTiled3D :: IO ()
 testVerifiedTiled3D = do
-  let shape = Verify.shape3 2 3 4
-  arr <- Verify.newArray shape
+  let verifiedShape = Verify.shape3 2 3 4
+  arr <- Verify.newArray verifiedShape
   Verify.runProg $
     Verify.parallel $
-      Verify.parForTiled3D 1 2 3 shape $ \ctx ix ->
+      Verify.parForTiled3D 1 2 3 verifiedShape $ \ctx ix ->
         case Verify.unIndex3 ix of
           (i, j, k) ->
             Verify.writeAt ctx arr ix (i * 100 + j * 10 + k)
@@ -310,13 +328,13 @@ testVerifiedTiled3D = do
 
 testVerifiedMap :: IO ()
 testVerifiedMap = do
-  let shape = Verify.shape1 5
-  left <- Verify.fromList shape [1 .. 5 :: Int]
-  right <- Verify.fromList shape [10, 20, 30, 40, 50 :: Int]
-  out <- Verify.newArray shape
+  let verifiedShape = Verify.shape1 5
+  left <- Verify.fromList verifiedShape [1 .. 5 :: Int]
+  right <- Verify.fromList verifiedShape [10, 20, 30, 40, 50 :: Int]
+  out <- Verify.newArray verifiedShape
   Verify.runProg $
     Verify.parallel $
-      Verify.parFor1D shape $ \ctx ix -> do
+      Verify.parFor1D verifiedShape $ \ctx ix -> do
         x <- Verify.readAt ctx left ix
         y <- Verify.readAt ctx right ix
         Verify.writeAt ctx out ix (x + y)
@@ -325,21 +343,21 @@ testVerifiedMap = do
 
 testVerifiedSum :: IO ()
 testVerifiedSum = do
-  let shape = Verify.shape1 10
-  arr <- Verify.fromList shape [1 .. 10 :: Int]
+  let verifiedShape = Verify.shape1 10
+  arr <- Verify.fromList verifiedShape [1 .. 10 :: Int]
   total <- Verify.runProg $
-    Verify.foldFor1D Verify.intSum shape $ \ix ->
-      Verify.readAt (Verify.rectReadAccess1D shape) arr ix
+    Verify.foldFor1D Verify.intSum verifiedShape $ \ix ->
+      Verify.readAt (Verify.rectReadAccess1D verifiedShape) arr ix
   assertEqual "verified sum" 55 total
 
 testVerifiedDot :: IO ()
 testVerifiedDot = do
-  let shape = Verify.shape1 4
-  left <- Verify.fromList shape [1, 2, 3, 4 :: Int]
-  right <- Verify.fromList shape [5, 6, 7, 8 :: Int]
+  let verifiedShape = Verify.shape1 4
+  left <- Verify.fromList verifiedShape [1, 2, 3, 4 :: Int]
+  right <- Verify.fromList verifiedShape [5, 6, 7, 8 :: Int]
   total <- Verify.runProg $
-    Verify.foldFor1D Verify.intSum shape $ \ix -> do
-      let ctx = Verify.rectReadAccess1D shape
+    Verify.foldFor1D Verify.intSum verifiedShape $ \ix -> do
+      let ctx = Verify.rectReadAccess1D verifiedShape
       x <- Verify.readAt ctx left ix
       y <- Verify.readAt ctx right ix
       pure (x * y)
@@ -347,21 +365,21 @@ testVerifiedDot = do
 
 testVerifiedMatMul :: IO ()
 testVerifiedMatMul = do
-  let shape = Verify.shape2 4 4
+  let verifiedShape = Verify.shape2 4 4
       kShape = Verify.shape1 4
-  left <- Verify.fromList shape [1 .. 16 :: Int]
+  left <- Verify.fromList verifiedShape [1 .. 16 :: Int]
   right <-
     Verify.fromList
-      shape
+      verifiedShape
       [ 1, 0, 0, 0
       , 0, 1, 0, 0
       , 0, 0, 1, 0
       , 0, 0, 0, 1
       ]
-  out <- Verify.newArray shape
+  out <- Verify.newArray verifiedShape
   Verify.runProg $
     Verify.parallel $
-      Verify.parFor2D shape $ \ctx outIx -> do
+      Verify.parFor2D verifiedShape $ \ctx outIx -> do
         let row = Verify.rowOf outIx
             col = Verify.colOf outIx
         total <-
@@ -392,36 +410,36 @@ testVerifiedShapeMismatch = do
 
 testVerifiedReducerScope :: IO ()
 testVerifiedReducerScope = do
-  let shape = Verify.shape1 10
+  let verifiedShape = Verify.shape1 10
   total <- Verify.runProg $
     Verify.parallel $
       Verify.newReducer Verify.intSum $ \sumVar -> do
-        Verify.parFor1D shape $ \_ ix ->
+        Verify.parFor1D verifiedShape $ \_ ix ->
           Verify.reduce sumVar (Verify.unIndex1 ix + 1)
         Verify.barrier
-        Verify.parFor1D shape $ \_ ix ->
+        Verify.parFor1D verifiedShape $ \_ ix ->
           Verify.reduce sumVar (Verify.unIndex1 ix + 1)
         Verify.getReducer sumVar
   assertEqual "verified reducer scope" 110 total
 
 testVerifiedThreePhaseNormalize :: IO ()
 testVerifiedThreePhaseNormalize = do
-  let shape = Verify.shape1 4
+  let verifiedShape = Verify.shape1 4
       input = [1.0, 2.0, 3.0, 4.0]
-      count = fromIntegral (Verify.extent1 shape)
-  src <- Verify.fromList shape input
-  out <- Verify.newArray shape
+      count = fromIntegral (Verify.extent1 verifiedShape)
+  src <- Verify.fromList verifiedShape input
+  out <- Verify.newArray verifiedShape
   Verify.runProg $
     Verify.parallel $
       Verify.newReducer Verify.doubleSum $ \sumVar -> do
-        Verify.parFor1D shape $ \ctx ix -> do
+        Verify.parFor1D verifiedShape $ \ctx ix -> do
           x <- Verify.readAt ctx src ix
           Verify.reduce sumVar x
         total <- Verify.getReducer sumVar
         Verify.barrier
         let mean = total / count
         Verify.newReducer Verify.doubleSum $ \sqVar -> do
-          Verify.parFor1D shape $ \ctx ix -> do
+          Verify.parFor1D verifiedShape $ \ctx ix -> do
             x <- Verify.readAt ctx src ix
             let delta = x - mean
             Verify.reduce sqVar (delta * delta)
@@ -431,7 +449,7 @@ testVerifiedThreePhaseNormalize = do
               invStd
                 | variance <= 0 = 0
                 | otherwise = 1 / sqrt variance
-          Verify.parFor1D shape $ \ctx ix -> do
+          Verify.parFor1D verifiedShape $ \ctx ix -> do
             x <- Verify.readAt ctx src ix
             Verify.writeAt ctx out ix ((x - mean) * invStd)
   xs <- Verify.toList out
@@ -439,25 +457,25 @@ testVerifiedThreePhaseNormalize = do
 
 testVerifiedTiledMatMul :: IO ()
 testVerifiedTiledMatMul = do
-  let shape = Verify.shape2 4 4
+  let verifiedShape = Verify.shape2 4 4
       kShape = Verify.shape1 4
-  left <- Verify.fromList shape [1 .. 16 :: Int]
+  left <- Verify.fromList verifiedShape [1 .. 16 :: Int]
   right <-
     Verify.fromList
-      shape
+      verifiedShape
       [ 1, 0, 0, 0
       , 0, 1, 0, 0
       , 0, 0, 1, 0
       , 0, 0, 0, 1
       ]
-  out <- Verify.newArray shape
+  out <- Verify.newArray verifiedShape
   Verify.runProg $
     Verify.parallel $
-      Verify.parForTiled2D 2 2 shape $ \ctx outIx -> do
+      Verify.parForTiled2D 2 2 verifiedShape $ \ctx outIx -> do
         let row = Verify.rowOf outIx
             col = Verify.colOf outIx
-            lhsCtx = Verify.rectReadAccess2D shape
-            rhsCtx = Verify.rectReadAccess2D shape
+            lhsCtx = Verify.rectReadAccess2D verifiedShape
+            rhsCtx = Verify.rectReadAccess2D verifiedShape
         total <-
           Verify.foldFor1D Verify.intSum kShape $ \k -> do
             lhs <- Verify.readAt lhsCtx left (Verify.pairOf row k)
@@ -726,14 +744,14 @@ testTiledRect2D :: IO ()
 testTiledRect2D = do
   let rows = 4
       cols = 5
-      shape = sh2 rows cols
+      loopShape = sh2 rows cols
       rect = rect2 1 1 4 5
   arr <- fromList (replicate (rows * cols) (0 :: Int))
   runProg $
     parallel $
       tiledForRect2D 2 3 rect $ \ix ->
         withIx2 ix $ \i j ->
-          writeArr arr (index2 shape ix) (i * 10 + j)
+          writeArr arr (index2 loopShape ix) (i * 10 + j)
   xs <- toList arr
   assertEqual
     "tiled rect 2d"
@@ -859,11 +877,11 @@ testTiledFor2D :: IO ()
 testTiledFor2D = do
   let rows = 3
       cols = 5
-      shape = sh2 rows cols
+      loopShape = sh2 rows cols
   arr <- newArr (rows * cols)
   runProg $
     parallel $
-      tiledFor2D 2 3 shape $ \i j ->
+      tiledFor2D 2 3 loopShape $ \i j ->
         writeArr arr (i * cols + j) (i * 10 + j)
   xs <- toList arr
   assertEqual "tiled for 2d" [i * 10 + j | i <- [0 .. rows - 1], j <- [0 .. cols - 1]] xs
@@ -873,12 +891,12 @@ testTiledFor3D = do
   let depth = 2
       rows = 3
       cols = 4
-      shape = sh3 depth rows cols
+      loopShape = sh3 depth rows cols
   arr <- newArr (depth * rows * cols)
   runProg $
     parallel $
-      tiledFor3D 1 2 3 shape $ \i j k ->
-        writeArr arr (index3 shape (ix3 i j k)) (i * 100 + j * 10 + k)
+      tiledFor3D 1 2 3 loopShape $ \i j k ->
+        writeArr arr (index3 loopShape (ix3 i j k)) (i * 100 + j * 10 + k)
   xs <- toList arr
   assertEqual
     "tiled for 3d"
@@ -1235,13 +1253,13 @@ testWavefrontFillCoverage :: IO ()
 testWavefrontFillCoverage = do
   let rows = 4
       cols = 5
-      shape = sh2 rows cols
+      loopShape = sh2 rows cols
   arr <- fromList (replicate (rows * cols) (-1 :: Int))
   runProg $
     parallel $
-      parForWavefront2D shape $ \ix ->
+      parForWavefront2D loopShape $ \ix ->
         withIx2 ix $ \i j ->
-          writeArr arr (index2 shape ix) (i * 10 + j)
+          writeArr arr (index2 loopShape ix) (i * 10 + j)
   xs <- toList arr
   assertEqual
     "wavefront fill coverage"
@@ -1343,9 +1361,11 @@ testDoubleMatMulBenchmarks = do
   scalar <- runDoubleMatMulExample 4 expected identity
   tiledScalar <- runDoubleTiledMatMulScalarExample 4 expected identity
   tiledVec <- runDoubleTiledMatMulVectorizedExample 4 expected identity
+  tiledVecNewApi <- runDoubleTiledMatMulVectorizedNewApiExample 4 expected identity
   assertApproxList "double matmul scalar" 1.0e-12 expected scalar
   assertApproxList "double tiled matmul scalar" 1.0e-12 expected tiledScalar
   assertApproxList "double tiled matmul vec" 1.0e-12 expected tiledVec
+  assertApproxList "double tiled matmul vec new api" 1.0e-12 expected tiledVecNewApi
 
 testJacobi1DBenchmark :: IO ()
 testJacobi1DBenchmark = do
@@ -1435,26 +1455,26 @@ runAffineFill :: Affine2 -> IO [Int]
 runAffineFill transform = do
   let rows = 3
       cols = 5
-      shape = sh2 rows cols
+      loopShape = sh2 rows cols
   arr <- newArr (rows * cols)
   runProg $
     parallel $
-      parForAffine2D transform shape $ \ix ->
+      parForAffine2D transform loopShape $ \ix ->
         withIx2 ix $ \i j ->
-          writeArr arr (index2 shape ix) (i * 10 + j)
+          writeArr arr (index2 loopShape ix) (i * 10 + j)
   toList arr
 
 runTransformFill :: Transform2D -> IO [Int]
 runTransformFill transform = do
   let rows = 3
       cols = 5
-      shape = sh2 rows cols
+      loopShape = sh2 rows cols
   arr <- newArr (rows * cols)
   runProg $
     parallel $
-      parForTransform2D transform shape $ \ix ->
+      parForTransform2D transform loopShape $ \ix ->
         withIx2 ix $ \i j ->
-          writeArr arr (index2 shape ix) (i * 10 + j)
+          writeArr arr (index2 loopShape ix) (i * 10 + j)
   toList arr
 
 runScheduleFill :: Schedule.Schedule -> IO [Int]
@@ -1463,7 +1483,7 @@ runScheduleFill schedule = do
   arr <- newArr (product dims)
   runProg $
     parallel $
-      for (scheduled schedule (grid dims)) $ \ix ->
+      forEach (shape dims `withSchedule` schedule) $ \ix ->
         writeArr arr (linearIndex dims ix) (encodeIxN (coords ix))
   toList arr
 

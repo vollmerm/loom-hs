@@ -14,6 +14,7 @@ module Loom.Benchmark.Kernels
   , runDoubleMatMulExample
   , runDoubleTiledMatMulScalarExample
   , runDoubleTiledMatMulVectorizedExample
+  , runDoubleTiledMatMulVectorizedNewApiExample
   , runMatMulExample
   , runPolyhedralTiledMatMulExample
   , runPolyhedralWavefrontEditDistanceExample
@@ -26,6 +27,7 @@ module Loom.Benchmark.Kernels
 import Loom
 import Loom.Expert
 import qualified Loom.Polyhedral as Poly
+import qualified Loom.Schedule as Schedule
 import qualified Loom.Verify as Verify
 import qualified Loom.Verify.Polyhedral as VerifyPoly
 import Data.Int (Int32)
@@ -121,6 +123,7 @@ benchmarks =
   , Benchmark "double-matmul-scalar" "parallel square double matrix multiply without tiling or vectorization" 256 setupDoubleMatrix runDoubleMatMulScalar
   , Benchmark "double-tiled-matmul-scalar" "parallel square double matrix multiply with tiling and scalar inner loops" 256 setupDoubleMatrix runDoubleTiledMatMulScalar
   , Benchmark "double-tiled-matmul-vec" "parallel square double matrix multiply with tiling and SIMD vectorization" 256 setupDoubleMatrix runDoubleTiledMatMulVectorized
+  , Benchmark "double-tiled-matmul-vec-newapi" "parallel square double matrix multiply with tiling and SIMD vectorization via shape-first Loom API" 256 setupDoubleMatrix runDoubleTiledMatMulVectorizedNewApi
   , Benchmark "wavefront-edit-distance" "wavefront dynamic-programming edit distance" 1024 setupEditDistance runWavefrontEditDistance
   , Benchmark "red-black-stencil" "barriered in-place red/black 5-point stencil sweep" 1024 setupImage runRedBlackStencil
   , Benchmark "normalize-3phase" "three-phase normalization with two reductions and barriers" 1000000 setupDoubleVector runThreePhaseNormalize
@@ -242,7 +245,7 @@ runFill n = do
   arr <- newArr n
   runProg $
     parallel $
-      for (range n) $ \i ->
+      for1 n Schedule.identity $ \i ->
         writeArr arr i (i * 3 + 1)
   sampleVector arr n
 
@@ -251,7 +254,7 @@ runFill3D n = do
   arr <- newArr (n * n * n)
   runProg $
     parallel $
-      for (grid3 n n n) $ \(i, j, k) ->
+      for3 n n n Schedule.identity $ \i j k ->
         writeArr arr ((i * n * n) + (j * n) + k) (i * 1000000 + j * 1000 + k)
   sampleVolume arr n
 
@@ -261,7 +264,7 @@ runMap env = do
   out <- newArr n
   runProg $
     parallel $
-      for (range n) $ \i -> do
+      for1 n Schedule.identity $ \i -> do
         x <- readArr (binaryLeft env) i
         y <- readArr (binaryRight env) i
         writeArr out i (x + (2 * y))
@@ -364,6 +367,13 @@ runDoubleTiledMatMulVectorized env = do
   runDoubleTiledMatMulVectorizedKernel n (doubleMatrixLeft env) (doubleMatrixRight env) out
   sampleDoubleMatrix out n
 
+runDoubleTiledMatMulVectorizedNewApi :: DoubleMatrixEnv -> IO Int
+runDoubleTiledMatMulVectorizedNewApi env = do
+  let n = doubleMatrixDim env
+  out <- newArr (n * n)
+  runDoubleTiledMatMulVectorizedNewApiKernel n (doubleMatrixLeft env) (doubleMatrixRight env) out
+  sampleDoubleMatrix out n
+
 runMatMulExample :: Int -> [Int] -> [Int] -> IO [Int]
 runMatMulExample n xs ys = do
   left <- fromList xs
@@ -412,6 +422,14 @@ runDoubleTiledMatMulVectorizedExample n xs ys = do
   runDoubleTiledMatMulVectorizedKernel n left right out
   toList out
 
+runDoubleTiledMatMulVectorizedNewApiExample :: Int -> [Double] -> [Double] -> IO [Double]
+runDoubleTiledMatMulVectorizedNewApiExample n xs ys = do
+  left <- fromList xs
+  right <- fromList ys
+  out <- newArr (n * n)
+  runDoubleTiledMatMulVectorizedNewApiKernel n left right out
+  toList out
+
 runJacobi1DExample :: Int -> [Double] -> IO [Double]
 runJacobi1DExample steps xs = do
   src <- fromList xs
@@ -443,13 +461,13 @@ runNBodyExample posX posY posZ mass
 
 runFill3DExample :: Int -> IO [Int]
 runFill3DExample n = do
-  let shape = sh3 n n n
+  let loopShape = sh3 n n n
   arr <- newArr (n * n * n)
   runProg $
     parallel $
-      parForSh3 shape $ \ix ->
+      parForSh3 loopShape $ \ix ->
         withIx3 ix $ \i j k ->
-          writeArr arr (index3 shape ix) (i * 100 + j * 10 + k)
+          writeArr arr (index3 loopShape ix) (i * 100 + j * 10 + k)
   toList arr
 
 runPolyhedralTiledMatMulExample :: Int -> [Int] -> [Int] -> IO [Int]
@@ -550,7 +568,7 @@ runMatMulKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
 runMatMulKernel n left right out =
   runProg $
     parallel $
-      for (range n) $ \i ->
+      for1 n Schedule.identity $ \i ->
         stripMine vecWidth n
           (\j0 -> writeMatMulVecChunk n left right out i j0)
           (\j -> writeMatMulScalarCell n left right out i j)
@@ -646,6 +664,24 @@ runDoubleTiledMatMulVectorizedKernel n left right out =
   where
     tile = max 1 (min 32 n)
 
+runDoubleTiledMatMulVectorizedNewApiKernel :: Int -> Arr Double -> Arr Double -> Arr Double -> IO ()
+runDoubleTiledMatMulVectorizedNewApiKernel n left right out =
+  runProg $
+    parallel $ do
+      for2 n chunkCount (Schedule.tile2 tile tileChunks) $ \i chunk ->
+        writeMatMulVecChunkDouble n left right out i (chunk * vecWidth)
+      if remainderCount > 0
+        then
+          for2 n remainderCount (Schedule.tile2 tile tile) $ \i jOffset ->
+            writeMatMulScalarCellDouble n left right out i (remainderStart + jOffset)
+        else pure ()
+  where
+    tile = max 1 (min 32 n)
+    tileChunks = max 1 (tile `quot` vecWidth)
+    chunkCount = n `quot` vecWidth
+    remainderStart = chunkCount * vecWidth
+    remainderCount = n - remainderStart
+
 runJacobi1DKernel :: Int -> Int -> Arr Double -> IO (Arr Double)
 runJacobi1DKernel steps n src = do
   current <- newArr n
@@ -661,19 +697,19 @@ runJacobi1DKernel steps n src = do
 
 runVerifiedJacobi1DKernel :: Int -> Int -> Arr Double -> IO (Arr Double)
 runVerifiedJacobi1DKernel steps n src = do
-  let shape = Verify.shape1 n
-      srcArray = Verify.wrapArray shape src
+  let verifiedShape = Verify.shape1 n
+      srcArray = Verify.wrapArray verifiedShape src
       copyCurrent srcArr dstArr =
         Verify.runProg $
           Verify.parallel $
-            Verify.parFor1D shape $ \ctx ix -> do
+            Verify.parFor1D verifiedShape $ \ctx ix -> do
               x <- Verify.readAt ctx srcArr ix
               Verify.writeAt ctx dstArr ix x
       stepKernel prev next =
         Verify.runProg $
           Verify.parallel $ do
-            let readCtx = Verify.rectReadAccess1D shape
-                writeCtx = Verify.rectWriteAccess1D shape
+            let readCtx = Verify.rectReadAccess1D verifiedShape
+                writeCtx = Verify.rectWriteAccess1D verifiedShape
                 writeVecChunk ix = do
                   left <- Verify.readDVecOffsetAt1D readCtx prev (-1) ix
                   center <- Verify.readDVecAt1D readCtx prev ix
@@ -701,8 +737,8 @@ runVerifiedJacobi1DKernel steps n src = do
         | otherwise = do
             stepKernel current next
             go (remaining - 1) next current
-  current <- Verify.newArray shape
-  scratch <- Verify.newArray shape
+  current <- Verify.newArray verifiedShape
+  scratch <- Verify.newArray verifiedShape
   copyCurrent srcArray current
   go steps current scratch
 
