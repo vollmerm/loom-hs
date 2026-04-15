@@ -24,6 +24,7 @@ module Loom.Benchmark.Kernels
   ) where
 
 import Loom
+import Loom.Expert
 import qualified Loom.Polyhedral as Poly
 import qualified Loom.Verify as Verify
 import qualified Loom.Verify.Polyhedral as VerifyPoly
@@ -241,19 +242,17 @@ runFill n = do
   arr <- newArr n
   runProg $
     parallel $
-      parFor n $ \i ->
+      for (range n) $ \i ->
         writeArr arr i (i * 3 + 1)
   sampleVector arr n
 
 runFill3D :: Int -> IO Int
 runFill3D n = do
-  let shape = sh3 n n n
   arr <- newArr (n * n * n)
   runProg $
     parallel $
-      parForSh3 shape $ \ix ->
-        withIx3 ix $ \i j k ->
-          writeArr arr (index3 shape ix) (i * 1000000 + j * 1000 + k)
+      for (grid3 n n n) $ \(i, j, k) ->
+        writeArr arr ((i * n * n) + (j * n) + k) (i * 1000000 + j * 1000 + k)
   sampleVolume arr n
 
 runMap :: BinaryEnv -> IO Int
@@ -262,7 +261,7 @@ runMap env = do
   out <- newArr n
   runProg $
     parallel $
-      parFor n $ \i -> do
+      for (range n) $ \i -> do
         x <- readArr (binaryLeft env) i
         y <- readArr (binaryRight env) i
         writeArr out i (x + (2 * y))
@@ -551,7 +550,7 @@ runMatMulKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
 runMatMulKernel n left right out =
   runProg $
     parallel $
-      parFor n $ \i ->
+      for (range n) $ \i ->
         stripMine vecWidth n
           (\j0 -> writeMatMulVecChunk n left right out i j0)
           (\j -> writeMatMulScalarCell n left right out i j)

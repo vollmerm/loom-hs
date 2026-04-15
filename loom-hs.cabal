@@ -68,6 +68,8 @@ library
     -- Modules exported by the library.
     exposed-modules:
         Loom
+        Loom.Expert
+        Loom.Schedule
         Loom.Verify
         Loom.Verify.Polyhedral
         Loom.Polyhedral

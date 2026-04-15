@@ -1,6 +1,6 @@
 module AffineCore (main) where
 
-import Loom
+import Loom.Expert
 
 main :: IO ()
 main = do

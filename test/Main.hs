@@ -7,7 +7,9 @@ import Control.Monad (unless)
 import Data.Int (Int32)
 import GHC.Conc (getNumCapabilities)
 import Loom
+import Loom.Expert
 import qualified Loom.Polyhedral as Poly
+import qualified Loom.Schedule as Schedule
 import qualified Loom.Verify as Verify
 import qualified Loom.Verify.Polyhedral as VerifyPoly
 import Loom.Benchmark.Kernels
@@ -119,7 +121,7 @@ testArrayUpdate :: IO ()
 testArrayUpdate = do
   arr <- fromList [1, 2, 3, 4 :: Int]
   runProg $
-    parFor (sizeOfArr arr) $ \i -> do
+    for (range (sizeOfArr arr)) $ \i -> do
       x <- readArr arr i
       writeArr arr i (x + 1)
   xs <- toList arr
@@ -177,11 +179,10 @@ testAffineNBasics = do
 
 testShapeLoop1D :: IO ()
 testShapeLoop1D = do
-  let shape = sh1 6
   arr <- newArr 6
   runProg $
-    parForSh1 shape $ \ix ->
-      writeArr arr (index1 shape ix) (unIx1 ix * 2)
+    for (range 6) $ \i ->
+      writeArr arr i (i * 2)
   xs <- toList arr
   assertEqual "shape loop 1d" [0, 2, 4, 6, 8, 10] xs
 
@@ -190,13 +191,11 @@ testShapeLoop3D = do
   let depth = 2
       rows = 3
       cols = 4
-      shape = sh3 depth rows cols
   arr <- newArr (depth * rows * cols)
   runProg $
     parallel $
-      parForSh3 shape $ \ix ->
-        withIx3 ix $ \i j k ->
-          writeArr arr (index3 shape ix) (i * 100 + j * 10 + k)
+      for (grid3 depth rows cols) $ \(i, j, k) ->
+        writeArr arr ((i * rows * cols) + (j * cols) + k) (i * 100 + j * 10 + k)
   xs <- toList arr
   assertEqual
     "shape loop 3d"
@@ -205,7 +204,7 @@ testShapeLoop3D = do
 
 testShapeLoopND :: IO ()
 testShapeLoopND = do
-  let shape = shN [2, 3, 2, 2]
+  let dims = [2, 3, 2, 2]
       expected =
         [ encodeIxN [i, j, k, l]
         | i <- [0 .. 1]
@@ -215,8 +214,8 @@ testShapeLoopND = do
         ]
   arr <- newArr (length expected)
   runProg $
-    parForShN shape $ \ix ->
-      writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+    for (grid dims) $ \ix ->
+      writeArr arr (linearIndex dims ix) (encodeIxN (coords ix))
   xs <- toList arr
   assertEqual "shape loop nd" expected xs
 
@@ -242,7 +241,7 @@ testRectLoopND = do
 
 testTiledLoopND :: IO ()
 testTiledLoopND = do
-  let shape = shN [3, 4, 2, 2]
+  let dims = [3, 4, 2, 2]
       tileShape = [2, 3, 1, 2]
       expected =
         [ encodeIxN [i, j, k, l]
@@ -253,8 +252,8 @@ testTiledLoopND = do
         ]
   arr <- newArr (length expected)
   runProg $
-    tiledForN tileShape shape $ \ix ->
-      writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+    for (scheduled (Schedule.tile tileShape) (grid dims)) $ \ix ->
+      writeArr arr (linearIndex dims ix) (encodeIxN (coords ix))
   xs <- toList arr
   assertEqual "tiled loop nd" expected xs
 
@@ -748,30 +747,33 @@ testTiledRect2D = do
 
 testScheduleNIdentity :: IO ()
 testScheduleNIdentity = do
-  xs <- runScheduleFill identityScheduleN
+  xs <- runScheduleFill Schedule.identity
   assertEqual "schedule n identity" expectedScheduleFill xs
 
 testScheduleNTile :: IO ()
 testScheduleNTile = do
-  xs <- runScheduleFill (tileScheduleN [2, 2, 1])
+  xs <- runScheduleFill (Schedule.tile [2, 2, 1])
   assertEqual "schedule n tile" expectedScheduleFill xs
 
 testScheduleNPermuteTile :: IO ()
 testScheduleNPermuteTile = do
   let schedule =
-        composeScheduleN
-          (permuteScheduleN [1, 0, 2])
-          (tileScheduleN [2, 2, 1])
+        Schedule.permute [1, 0, 2]
+          `Schedule.compose` Schedule.tile [2, 2, 1]
   xs <- runScheduleFill schedule
   assertEqual "schedule n permute tile" expectedScheduleFill xs
 
 testScheduleNRendering :: IO ()
 testScheduleNRendering = do
   let schedule =
-        composeScheduleN
-          (affineScheduleN (permuteAffineN [1, 0, 2]))
-          (tileScheduleN [2, 2, 1])
-  assertEqual "schedule n rendering" "affine -> tile(2,2,1)" (renderScheduleN schedule)
+        Schedule.affine
+          [ [0, 1, 0]
+          , [1, 0, 0]
+          , [0, 0, 1]
+          ]
+          [0, 0, 0]
+          `Schedule.compose` Schedule.tile [2, 2, 1]
+  assertEqual "schedule n rendering" "affine -> tile(2,2,1)" (Schedule.render schedule)
 
 testTransform2DIdentity :: IO ()
 testTransform2DIdentity = do
@@ -1451,14 +1453,14 @@ runTransformFill transform = do
           writeArr arr (index2 shape ix) (i * 10 + j)
   toList arr
 
-runScheduleFill :: ScheduleN -> IO [Int]
+runScheduleFill :: Schedule.Schedule -> IO [Int]
 runScheduleFill schedule = do
-  let shape = shN [2, 3, 4]
-  arr <- newArr (product (unShN shape))
+  let dims = [2, 3, 4]
+  arr <- newArr (product dims)
   runProg $
     parallel $
-      parForScheduleN schedule shape $ \ix ->
-        writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+      for (scheduled schedule (grid dims)) $ \ix ->
+        writeArr arr (linearIndex dims ix) (encodeIxN (coords ix))
   toList arr
 
 expectedAffineFill :: [Int]
