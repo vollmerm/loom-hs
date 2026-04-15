@@ -118,21 +118,25 @@ import Loom.Internal.Kernel
   )
 import qualified Loom.Internal.Kernel as K
 
+-- | Supported verified loop ranks.
 data Rank
   = Rank1
   | Rank2
   | Rank3
 
+-- | Schedule families tracked by the verified API.
 data Schedule
   = Rect
   | Tile
   | Wavefront
 
+-- | Access capabilities allowed by a verified access context.
 data Capability
   = ReadOnly
   | WriteOnly
   | ReadWrite
 
+-- | Relative positions used by wavefront reads and writes.
 data WaveOffset
   = WaveCurrent
   | WavePrevRow
@@ -148,14 +152,17 @@ waveOffsetDelta offset =
     WavePrevCol -> (0, -1)
     WavePrevDiag -> (-1, -1)
 
+-- | A verified loop shape with a statically known rank.
 data Shape (rank :: Rank) where
   Shape1 :: !Int -> !Sh1 -> Shape 'Rank1
   Shape2 :: !Int -> !Int -> !Sh2 -> Shape 'Rank2
   Shape3 :: !Int -> !Int -> !Int -> !Sh3 -> Shape 'Rank3
 
+-- | An array paired with its verified shape.
 data Array (rank :: Rank) a where
   Array :: !(Shape rank) -> !(Arr a) -> Array rank a
 
+-- | An index value tagged by schedule and rank.
 data Index (sched :: Schedule) (rank :: Rank) where
   Index1 :: !Ix1 -> Index sched 'Rank1
   Index2 :: !Ix2 -> Index 'Rect 'Rank2
@@ -164,6 +171,7 @@ data Index (sched :: Schedule) (rank :: Rank) where
   Index3 :: !Ix3 -> Index 'Rect 'Rank3
   TileIndex3 :: !Ix3 -> !Ix3 -> Index 'Tile 'Rank3
 
+-- | Access permissions and schedule metadata for verified array operations.
 data AccessCtx (cap :: Capability) (sched :: Schedule) (rank :: Rank) where
   Access1 :: !(Shape 'Rank1) -> AccessCtx cap 'Rect 'Rank1
   Access2 :: !(Shape 'Rank2) -> AccessCtx cap 'Rect 'Rank2
@@ -172,6 +180,7 @@ data AccessCtx (cap :: Capability) (sched :: Schedule) (rank :: Rank) where
   Access3 :: !(Shape 'Rank3) -> AccessCtx cap 'Rect 'Rank3
   TileAccess3 :: !(Shape 'Rank3) -> AccessCtx cap 'Tile 'Rank3
 
+-- | A verified wrapper around a reducer variable.
 newtype ReduceVar a = ReduceVar (K.RedVar a)
 
 class CanRead (cap :: Capability)
@@ -186,46 +195,57 @@ instance CanWrite 'WriteOnly
 
 instance CanWrite 'ReadWrite
 
+-- | Build a rank-1 verified shape.
 shape1 :: Int -> Shape 'Rank1
 {-# INLINE shape1 #-}
 shape1 n = Shape1 n (sh1 n)
 
+-- | Build a rank-2 verified shape.
 shape2 :: Int -> Int -> Shape 'Rank2
 {-# INLINE shape2 #-}
 shape2 rows cols = Shape2 rows cols (sh2 rows cols)
 
+-- | Build a rank-3 verified shape.
 shape3 :: Int -> Int -> Int -> Shape 'Rank3
 {-# INLINE shape3 #-}
 shape3 depth rows cols = Shape3 depth rows cols (sh3 depth rows cols)
 
+-- | Build a rectangular rank-1 index.
 rectIx1 :: Int -> Index 'Rect 'Rank1
 {-# INLINE rectIx1 #-}
 rectIx1 = Index1 . ix1
 
+-- | Build a rectangular rank-2 index.
 rectIx2 :: Int -> Int -> Index 'Rect 'Rank2
 {-# INLINE rectIx2 #-}
 rectIx2 row col = Index2 (ix2 row col)
 
+-- | Build a rectangular rank-3 index.
 rectIx3 :: Int -> Int -> Int -> Index 'Rect 'Rank3
 {-# INLINE rectIx3 #-}
 rectIx3 depth row col = Index3 (ix3 depth row col)
 
+-- | Return the extent of a rank-1 shape.
 extent1 :: Shape 'Rank1 -> Int
 {-# INLINE extent1 #-}
 extent1 (Shape1 n _) = n
 
+-- | Return the extents of a rank-2 shape.
 extent2 :: Shape 'Rank2 -> (Int, Int)
 {-# INLINE extent2 #-}
 extent2 (Shape2 rows cols _) = (rows, cols)
 
+-- | Return the extents of a rank-3 shape.
 extent3 :: Shape 'Rank3 -> (Int, Int, Int)
 {-# INLINE extent3 #-}
 extent3 (Shape3 depth rows cols _) = (depth, rows, cols)
 
+-- | Allocate a verified array with the given shape.
 newArray :: Prim a => Shape rank -> IO (Array rank a)
 {-# INLINE newArray #-}
 newArray shape = Array shape <$> newArr (shapeSize shape)
 
+-- | Allocate and populate a verified array from a list.
 fromList :: Prim a => Shape rank -> [a] -> IO (Array rank a)
 {-# INLINE fromList #-}
 fromList shape xs
@@ -238,10 +258,12 @@ fromList shape xs
             ++ show (length xs)
         )
 
+-- | Convert a verified array to a list.
 toList :: Prim a => Array rank a -> IO [a]
 {-# INLINE toList #-}
 toList (Array _ arr) = K.toList arr
 
+-- | Attach a verified shape to an existing array.
 wrapArray :: Prim a => Shape rank -> Arr a -> Array rank a
 {-# INLINE wrapArray #-}
 wrapArray shape arr
@@ -254,10 +276,12 @@ wrapArray shape arr
             ++ show (sizeOfArr arr)
         )
 
+-- | Drop the verified wrapper around an array.
 unwrapArray :: Array rank a -> Arr a
 {-# INLINE unwrapArray #-}
 unwrapArray (Array _ arr) = arr
 
+-- | Run a verified rectangular 1D loop.
 parFor1D ::
   Shape 'Rank1 ->
   (AccessCtx 'ReadWrite 'Rect 'Rank1 -> Index 'Rect 'Rank1 -> Prog ()) ->
@@ -266,6 +290,7 @@ parFor1D ::
 parFor1D shape@(Shape1 _ rawShape) body =
   parForSh1 rawShape (\ix -> body (Access1 shape) (Index1 ix))
 
+-- | Run a verified rectangular 2D loop.
 parFor2D ::
   Shape 'Rank2 ->
   (AccessCtx 'ReadWrite 'Rect 'Rank2 -> Index 'Rect 'Rank2 -> Prog ()) ->
@@ -274,6 +299,7 @@ parFor2D ::
 parFor2D shape@(Shape2 _ _ rawShape) body =
   parForSh2 rawShape (\ix -> body (Access2 shape) (Index2 ix))
 
+-- | Run a verified rectangular 3D loop.
 parFor3D ::
   Shape 'Rank3 ->
   (AccessCtx 'ReadWrite 'Rect 'Rank3 -> Index 'Rect 'Rank3 -> Prog ()) ->
@@ -282,6 +308,7 @@ parFor3D ::
 parFor3D shape@(Shape3 _ _ _ rawShape) body =
   parForSh3 rawShape (\ix -> body (Access3 shape) (Index3 ix))
 
+-- | Run a verified tiled 2D loop.
 parForTiled2D ::
   Int ->
   Int ->
@@ -296,6 +323,7 @@ parForTiled2D tileRows tileCols shape@(Shape2 _ _ rawShape) body =
         (TileAccess2 shape)
         (TileIndex2 (ix2 row col) (ix2 (row - row0) (col - col0)))
 
+-- | Run a verified tiled 3D loop.
 parForTiled3D ::
   Int ->
   Int ->
@@ -311,6 +339,7 @@ parForTiled3D tileDepth tileRows tileCols shape@(Shape3 _ _ _ rawShape) body =
         (TileAccess3 shape)
         (TileIndex3 (ix3 depth row col) (ix3 (depth - depth0) (row - row0) (col - col0)))
 
+-- | Run a verified 2D wavefront loop.
 parForWavefront2D ::
   Shape 'Rank2 ->
   (AccessCtx 'ReadWrite 'Wavefront 'Rank2 -> Index 'Wavefront 'Rank2 -> Prog ()) ->
@@ -324,48 +353,59 @@ parForWavefront2D shape@(Shape2 _ _ rawShape) body =
           (WaveAccess2 shape)
           (WaveIndex2 rawIx (row + col) row)
 
+-- | Reduce the values produced by a verified 1D loop.
 foldFor1D :: Reducer a -> Shape 'Rank1 -> (Index 'Rect 'Rank1 -> Prog a) -> Prog a
 {-# INLINE foldFor1D #-}
 foldFor1D reducer shape body =
   foldFor reducer (shapeSize shape) (\i -> body (Index1 (ix1 i)))
 
+-- | Access context for rectangular rank-1 reads.
 rectReadAccess1D :: Shape 'Rank1 -> AccessCtx 'ReadOnly 'Rect 'Rank1
 {-# INLINE rectReadAccess1D #-}
 rectReadAccess1D = Access1
 
+-- | Access context for rectangular rank-2 reads.
 rectReadAccess2D :: Shape 'Rank2 -> AccessCtx 'ReadOnly 'Rect 'Rank2
 {-# INLINE rectReadAccess2D #-}
 rectReadAccess2D = Access2
 
+-- | Access context for rectangular rank-1 writes.
 rectWriteAccess1D :: Shape 'Rank1 -> AccessCtx 'WriteOnly 'Rect 'Rank1
 {-# INLINE rectWriteAccess1D #-}
 rectWriteAccess1D = Access1
 
+-- | Access context for rectangular rank-2 writes.
 rectWriteAccess2D :: Shape 'Rank2 -> AccessCtx 'WriteOnly 'Rect 'Rank2
 {-# INLINE rectWriteAccess2D #-}
 rectWriteAccess2D = Access2
 
+-- | Access context for rectangular rank-1 reads and writes.
 rectReadWriteAccess1D :: Shape 'Rank1 -> AccessCtx 'ReadWrite 'Rect 'Rank1
 {-# INLINE rectReadWriteAccess1D #-}
 rectReadWriteAccess1D = Access1
 
+-- | Access context for rectangular rank-2 reads and writes.
 rectReadWriteAccess2D :: Shape 'Rank2 -> AccessCtx 'ReadWrite 'Rect 'Rank2
 {-# INLINE rectReadWriteAccess2D #-}
 rectReadWriteAccess2D = Access2
 
+-- | Allocate a verified reducer variable.
 newReducer :: Reducer a -> (ReduceVar a -> Prog r) -> Prog r
 {-# INLINE newReducer #-}
 newReducer reducer body =
   K.newReducer reducer (\redVar -> body (ReduceVar redVar))
 
+-- | Contribute one value to a verified reducer.
 reduce :: ReduceVar a -> a -> Prog ()
 {-# INLINE reduce #-}
 reduce (ReduceVar redVar) x = K.reduce redVar x
 
+-- | Read the final value of a verified reducer.
 getReducer :: ReduceVar a -> Prog a
 {-# INLINE getReducer #-}
 getReducer (ReduceVar redVar) = K.getReducer redVar
 
+-- | Read an element through verified access metadata.
 readAt ::
   (Prim a, CanRead cap) =>
   AccessCtx cap sched rank ->
@@ -394,6 +434,7 @@ readAt ctx arr ix =
       checkAccessShape "readAt" ctx3 arrShape `seq`
         readArr rawArr (index3 (rawShape3 arrShape) (globalIndex3 rawIx3))
 
+-- | Read a rank-1 element at a constant offset from the current index.
 readOffsetAt1D ::
   (Prim a, CanRead cap) =>
   AccessCtx cap 'Rect 'Rank1 ->
@@ -409,6 +450,7 @@ readOffsetAt1D ctx arr offset ix =
         checkShiftedWindow1D "readOffsetAt1D" shape rawIx offset 1 `seq`
           readArr rawArr (unIx1 rawIx + offset)
 
+-- | Read a DVec starting at the current rank-1 index.
 readDVecAt1D ::
   CanRead cap =>
   AccessCtx cap 'Rect 'Rank1 ->
@@ -418,6 +460,7 @@ readDVecAt1D ::
 {-# INLINE readDVecAt1D #-}
 readDVecAt1D ctx arr = readDVecOffsetAt1D ctx arr 0
 
+-- | Read a DVec starting at a constant offset from the current rank-1 index.
 readDVecOffsetAt1D ::
   CanRead cap =>
   AccessCtx cap 'Rect 'Rank1 ->
@@ -433,6 +476,7 @@ readDVecOffsetAt1D ctx arr offset ix =
         checkShiftedWindow1D "readDVecOffsetAt1D" shape rawIx offset vecWidth `seq`
           readDVec rawArr (unIx1 rawIx + offset)
 
+-- | Write an element through verified access metadata.
 writeAt ::
   (Prim a, CanWrite cap) =>
   AccessCtx cap sched rank ->
@@ -462,6 +506,7 @@ writeAt ctx arr ix x =
       checkAccessShape "writeAt" ctx3 arrShape `seq`
         writeArr rawArr (index3 (rawShape3 arrShape) (globalIndex3 rawIx3)) x
 
+-- | Write a DVec starting at the current rank-1 index.
 writeDVecAt1D ::
   CanWrite cap =>
   AccessCtx cap 'Rect 'Rank1 ->
@@ -477,6 +522,7 @@ writeDVecAt1D ctx arr ix vec =
         checkShiftedWindow1D "writeDVecAt1D" shape rawIx 0 vecWidth `seq`
           writeDVec rawArr (unIx1 rawIx) vec
 
+-- | Read a wavefront-relative element from a 2D verified array.
 readWaveAt ::
   (Prim a, CanRead cap) =>
   AccessCtx cap 'Wavefront 'Rank2 ->
@@ -493,6 +539,7 @@ readWaveAt ctx arr base offset ix =
       let targetIx = waveArrayIndex arrShape base offset ix
        in readArr rawArr (index2 (rawShape2 arrShape) targetIx)
 
+-- | Write the current wavefront position in a 2D verified array.
 writeWaveAt ::
   (Prim a, CanWrite cap) =>
   AccessCtx cap 'Wavefront 'Rank2 ->
@@ -509,37 +556,44 @@ writeWaveAt ctx arr base ix x =
       let targetIx = waveArrayIndex arrShape base WaveCurrent ix
        in writeArr rawArr (index2 (rawShape2 arrShape) targetIx) x
 
+-- | Project the row component of a rank-2 index.
 rowOf :: Index sched 'Rank2 -> Index 'Rect 'Rank1
 {-# INLINE rowOf #-}
 rowOf ix =
   case unIndex2 ix of
     (row, _) -> Index1 (ix1 row)
 
+-- | Project the column component of a rank-2 index.
 colOf :: Index sched 'Rank2 -> Index 'Rect 'Rank1
 {-# INLINE colOf #-}
 colOf ix =
   case unIndex2 ix of
     (_, col) -> Index1 (ix1 col)
 
+-- | Combine two rank-1 indices into one rectangular rank-2 index.
 pairOf :: Index 'Rect 'Rank1 -> Index 'Rect 'Rank1 -> Index 'Rect 'Rank2
 {-# INLINE pairOf #-}
 pairOf (Index1 row) (Index1 col) = Index2 (ix2 (unIx1 row) (unIx1 col))
 
+-- | Extract the coordinate stored in a rank-1 index.
 unIndex1 :: Index sched 'Rank1 -> Int
 {-# INLINE unIndex1 #-}
 unIndex1 (Index1 rawIx) = unIx1 rawIx
 
+-- | Extract the global coordinates stored in a rank-2 index.
 unIndex2 :: Index sched 'Rank2 -> (Int, Int)
 {-# INLINE unIndex2 #-}
 unIndex2 (Index2 rawIx) = unIx2 rawIx
 unIndex2 (TileIndex2 rawIx _) = unIx2 rawIx
 unIndex2 (WaveIndex2 rawIx _ _) = unIx2 rawIx
 
+-- | Extract the global coordinates stored in a rank-3 index.
 unIndex3 :: Index sched 'Rank3 -> (Int, Int, Int)
 {-# INLINE unIndex3 #-}
 unIndex3 (Index3 rawIx) = unIx3 rawIx
 unIndex3 (TileIndex3 rawIx _) = unIx3 rawIx
 
+-- | Return the origin of the current 2D tile.
 tileOriginOf :: Index 'Tile 'Rank2 -> (Int, Int)
 {-# INLINE tileOriginOf #-}
 tileOriginOf (TileIndex2 rawIx localIx) =
@@ -547,10 +601,12 @@ tileOriginOf (TileIndex2 rawIx localIx) =
       (localRow, localCol) = unIx2 localIx
    in (row - localRow, col - localCol)
 
+-- | Return the local coordinates within the current 2D tile.
 tileLocalOf :: Index 'Tile 'Rank2 -> (Int, Int)
 {-# INLINE tileLocalOf #-}
 tileLocalOf (TileIndex2 _ localIx) = unIx2 localIx
 
+-- | Return the wavefront diagonal and position-along-diagonal.
 waveCoordsOf :: Index 'Wavefront 'Rank2 -> (Int, Int)
 {-# INLINE waveCoordsOf #-}
 waveCoordsOf (WaveIndex2 _ diag along) = (diag, along)

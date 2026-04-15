@@ -1,5 +1,33 @@
+{-|
+Module      : Loom.Expert
+Description : Low-level shapes, schedules, and loop primitives for expert use.
+Copyright   :
+License     : BSD-3-Clause
+
+The `Loom.Expert` module exposes the low-level building blocks that sit underneath the
+shape-first Loom front door.
+
+Import this module when you need direct control over:
+
+- raw indices and shapes,
+- explicit affine or scheduled loop lowering,
+- specialized tiled or transformed loop forms,
+- or code that needs the representation-oriented API directly.
+
+Most users should start in the Loom and Loom.Schedule modules. Reach for this module
+when you want to describe the exact execution model directly.
+
+@
+import Loom.Expert
+
+runProg $ parallel $
+  tiledFor2D 32 32 (sh2 rows cols) $ \\i j -> ...
+@
+-}
 module Loom.Expert
-  ( Arr
+  (
+    -- * Core types
+    Arr
   , Ix1
   , Ix2
   , Ix3
@@ -22,6 +50,7 @@ module Loom.Expert
   , Reducer
   , RedVar
   , AccVar
+    -- * Shape and index construction
   , ix1
   , ix2
   , ix3
@@ -51,6 +80,7 @@ module Loom.Expert
   , index2
   , index3
   , indexN
+    -- * Affine maps and schedules
   , applyAffineN
   , composeAffineN
   , invertAffineN
@@ -76,6 +106,7 @@ module Loom.Expert
   , composeTransform2D
   , interchangeTransform2D
   , skewTransform2D
+    -- * Arrays, execution, and loop forms
   , vecWidth
   , sizeOfArr
   , readArrIO
@@ -109,6 +140,7 @@ module Loom.Expert
   , tiledFor2D
   , tiledFor3D
   , stripMine
+    -- * SIMD operations
   , broadcastVec
   , broadcastIVec
   , broadcastI32Vec
@@ -135,6 +167,7 @@ module Loom.Expert
   , sumIVec
   , sumI32Vec
   , sumDVec
+    -- * Reductions and accumulators
   , newReducer
   , reduce
   , getReducer

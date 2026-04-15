@@ -1,5 +1,49 @@
+{-|
+Module      : Loom
+Description : Shape-first parallel loops for array-oriented kernels.
+Copyright   :
+License     : BSD-3-Clause
+
+Loom is the main entry point for writing parallel kernels with a small,
+shape-first API.
+
+The usual workflow is:
+
+1. allocate or wrap arrays,
+2. describe the iteration space with 'shape' or one of the rank-specific loop
+   combinators,
+3. optionally attach a schedule with
+   <https://hackage.haskell.org/package/loom-hs/docs/Loom.html#v:withSchedule 'withSchedule'>,
+4. read and write array elements inside 'parallel' code,
+5. run the kernel with 'runProg'.
+
+For most code, import the Loom module together with qualified schedule constructors:
+
+@
+import Loom
+import qualified Loom.Schedule as Schedule
+@
+
+A small 2D example:
+
+@
+step :: Int -> Int -> Arr Double -> Arr Double -> IO ()
+step rows cols input output =
+  runProg $ parallel $
+    for2 rows cols (Schedule.tile2 32 32) $ \\i j -> do
+      let ix = i * cols + j
+      x <- readArr input ix
+      writeArr output ix (x + 1)
+@
+
+Use the Loom.Schedule module to build schedules, Loom.Polyhedral for legality analysis
+and lowering, and Loom.Expert only when you need the low-level loop and shape
+representations directly.
+-}
 module Loom
-  ( Arr
+  (
+    -- * Core types
+    Arr
   , Index
   , Domain
   , Schedule
@@ -11,6 +55,8 @@ module Loom
   , Reducer
   , RedVar
   , AccVar
+
+    -- * Shape-first loop API
   , shape
   , withSchedule
   , forEach
@@ -19,6 +65,8 @@ module Loom
   , for3
   , coords
   , linearIndex
+
+    -- * Arrays and execution
   , newArr
   , fromList
   , toList
@@ -30,6 +78,8 @@ module Loom
   , parallel
   , barrier
   , stripMine
+
+    -- * SIMD array operations
   , broadcastVec
   , broadcastIVec
   , broadcastI32Vec
@@ -56,6 +106,8 @@ module Loom
   , sumIVec
   , sumI32Vec
   , sumDVec
+
+    -- * Reductions and accumulators
   , newReducer
   , reduce
   , getReducer
@@ -158,16 +210,42 @@ import Loom.Internal.Kernel
 import qualified Loom.Internal.Schedule as InternalSchedule
 import Loom.Schedule (Schedule)
 
+-- | An N-dimensional index value passed to 'forEach'.
+--
+-- Use 'coords' to inspect the coordinates directly, or prefer 'for1', 'for2',
+-- and 'for3' when you want fixed-rank loop variables.
 type Index = IxN
 
+-- | An iteration domain built from extents and, optionally, a schedule.
+--
+-- Construct domains with 'shape' and attach schedules with 'withSchedule'.
+-- Most code can avoid handling domain values directly by using 'for1',
+-- 'for2', or 'for3'.
 data Domain = Domain ![Int] !(Maybe Schedule)
 
+-- | Build an unscheduled iteration domain from a list of extents.
+--
+-- Each element of the list is the extent of one loop dimension.
+--
+-- @
+-- shape [rows, cols]
+-- shape [depth, rows, cols]
+-- @
 shape :: [Int] -> Domain
 shape dims = Domain dims Nothing
 {-# INLINE shape #-}
 
 infixl 5 `withSchedule`
 
+-- | Attach a schedule to a domain.
+--
+-- Repeated applications compose left to right, so:
+--
+-- @
+-- shape dims `withSchedule` s1 `withSchedule` s2
+-- @
+--
+-- applies @s1@ and then @s2@.
 withSchedule :: Domain -> Schedule -> Domain
 withSchedule (Domain dims maybeSchedule) schedule =
   Domain dims (Just combined)
@@ -178,6 +256,21 @@ withSchedule (Domain dims maybeSchedule) schedule =
         Just current -> InternalSchedule.compose current schedule
 {-# INLINE withSchedule #-}
 
+-- | Traverse an iteration domain in parallel.
+--
+-- 'forEach' is the rank-polymorphic loop combinator. It is a good fit when the
+-- rank is not known until runtime or when a kernel naturally works with an
+-- index value as a whole.
+--
+-- When the rank is fixed in the source code, prefer 'for1', 'for2', or 'for3'
+-- for clearer loop bodies.
+--
+-- @
+-- runProg $ parallel $
+--   forEach (shape [rows, cols] `withSchedule` Schedule.tile [32, 32]) $ \\ix -> do
+--     let [i, j] = coords ix
+--     ...
+-- @
 forEach :: Domain -> (Index -> Prog ()) -> Prog ()
 forEach (Domain dims maybeSchedule) body =
   case (dims, maybeSchedule) of
@@ -205,6 +298,13 @@ forEach (Domain dims maybeSchedule) body =
       parForShN (shN dims) body
 {-# INLINE forEach #-}
 
+-- | Run a one-dimensional parallel loop with an explicit schedule.
+--
+-- Use @Schedule.identity@ when you want a plain parallel loop.
+--
+-- @
+-- for1 n Schedule.identity $ \\i -> ...
+-- @
 for1 :: Int -> Schedule -> (Int -> Prog ()) -> Prog ()
 for1 n schedule body =
   if InternalSchedule.isIdentitySchedule schedule
@@ -213,6 +313,13 @@ for1 n schedule body =
       withIndex1 "for1" ix body
 {-# INLINE for1 #-}
 
+-- | Run a two-dimensional parallel loop with an explicit schedule.
+--
+-- This is the most common entry point for matrix-shaped kernels.
+--
+-- @
+-- for2 rows cols (Schedule.tile2 32 32) $ \\i j -> ...
+-- @
 for2 :: Int -> Int -> Schedule -> (Int -> Int -> Prog ()) -> Prog ()
 for2 rows cols schedule body =
   if InternalSchedule.isIdentitySchedule schedule
@@ -226,6 +333,11 @@ for2 rows cols schedule body =
             withIndex2 "for2" ix body
 {-# INLINE for2 #-}
 
+-- | Run a three-dimensional parallel loop with an explicit schedule.
+--
+-- @
+-- for3 depth rows cols (Schedule.tile3 8 8 8) $ \\d i j -> ...
+-- @
 for3 :: Int -> Int -> Int -> Schedule -> (Int -> Int -> Int -> Prog ()) -> Prog ()
 for3 depth rows cols schedule body =
   if InternalSchedule.isIdentitySchedule schedule
@@ -239,10 +351,23 @@ for3 depth rows cols schedule body =
             withIndex3 "for3" ix body
 {-# INLINE for3 #-}
 
+-- | Return the coordinates stored in an 'Index'.
+--
+-- This is most useful with 'forEach'. Fixed-rank loops usually read more
+-- clearly with 'for1', 'for2', or 'for3'.
 coords :: Index -> [Int]
 coords = unIxN
 {-# INLINE coords #-}
 
+-- | Convert an 'Index' into a row-major linear offset for the given extents.
+--
+-- The list of extents should match the shape of the index.
+--
+-- @
+-- forEach (shape [rows, cols]) $ \ix -> do
+--   let offset = linearIndex [rows, cols] ix
+--   ...
+-- @
 linearIndex :: [Int] -> Index -> Int
 linearIndex dims = indexN (shN dims)
 {-# INLINE linearIndex #-}

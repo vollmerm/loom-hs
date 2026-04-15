@@ -198,22 +198,33 @@ import GHC.Exts hiding
   )
 import GHC.Int (Int32 (..))
 
+-- | A mutable flat primitive array.
+--
+-- Arrays are the main storage abstraction used by Loom kernels.
 data Arr a = Arr !Int !(MutablePrimArray RealWorld a)
 
+-- | A one-dimensional index.
 newtype Ix1 = Ix1 Int
 
+-- | A two-dimensional index.
 data Ix2 = Ix2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
+-- | A three-dimensional index.
 data Ix3 = Ix3 {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
+-- | An index of arbitrary rank.
 newtype IxN = IxN [Int]
 
+-- | A one-dimensional shape.
 newtype Sh1 = Sh1 Int
 
+-- | A two-dimensional shape.
 data Sh2 = Sh2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
+-- | A three-dimensional shape.
 data Sh3 = Sh3 {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
+-- | A shape of arbitrary rank.
 newtype ShN = ShN [Int]
 
 data Rect2 =
@@ -244,8 +255,10 @@ data ScheduleStageN
   = ScheduleAffineStageN !AffineN
   | ScheduleTileStageN ![Int]
 
+-- | A rank-polymorphic loop schedule.
 newtype ScheduleN = ScheduleN [ScheduleStageN]
 
+-- | A compiled 2D transform representation used by specialized lowerings.
 newtype Transform2D = Transform2D TransformExpr2D
 
 data TransformExpr2D
@@ -270,6 +283,10 @@ data NormalizedTransformStage2D
 
 newtype NormalizedTransform2D = NormalizedTransform2D [NormalizedTransformStage2D]
 
+-- | A width-4 logical vector value.
+--
+-- Specialized constructors are used for element types with dedicated SIMD
+-- representations.
 data Vec a where
   Vec :: !a -> !a -> !a -> !a -> Vec a
 #if WORD_SIZE_IN_BITS == 64
@@ -281,13 +298,16 @@ data Vec a where
   VecDouble :: DoubleX2# -> DoubleX2# -> Vec Double
 
 #if WORD_SIZE_IN_BITS == 64
+-- | A SIMD-sized vector of machine integers.
 data IVec = IVec Int64X2# Int64X2#
 #else
 data IVec = IVec Int32X4#
 #endif
 
+-- | A SIMD-sized vector of 'Int32' values.
 data I32Vec = I32Vec Int32X4#
 
+-- | A SIMD-sized vector of 'Double' values.
 data DVec = DVec DoubleX2# DoubleX2#
 
 class (Prim a, Num a) => VecOps a where
@@ -337,9 +357,11 @@ data ReducerSpec rep a = ReducerSpec
   , reducerDone :: rep -> a
   }
 
+-- | A parallel reduction strategy.
 data Reducer a where
   Reducer :: Prim rep => !(ReducerSpec rep a) -> Reducer a
 
+-- | A handle to reducer state allocated inside a kernel.
 data RedVar a where
   LocalRedVar ::
     Prim rep =>
@@ -353,6 +375,7 @@ data RedVar a where
     !(ReducerSpec rep a) ->
     RedVar a
 
+-- | A mutable scalar accumulator allocated inside a kernel.
 data AccVar a where
   AccVar :: Prim a => !(PrimVar RealWorld a) -> AccVar a
 
@@ -407,6 +430,10 @@ class Monad repr => Loop repr where
   loopWriteAcc :: Prim a => AccVar a -> a -> repr ()
   loopFoldFor :: Reducer a -> Int -> (Int -> repr a) -> repr a
 
+-- | The program type used by Loom kernels.
+--
+-- 'Prog' is a monad for array reads, writes, loop construction, and reduction
+-- operations that ultimately runs in 'IO' via 'runProg'.
 newtype Prog a = Prog
   { unProg :: forall repr r. Loop repr => (a -> repr r) -> repr r
   }
@@ -677,21 +704,26 @@ instance VecAccum Double where
          in go 0 lo0 hi0
 
 {-# INLINE newArr #-}
+-- | Allocate a new uninitialized array of the given length.
 newArr :: Prim a => Int -> IO (Arr a)
 newArr n = Arr n <$> newPrimArray n
 
 {-# INLINE sizeOfArr #-}
+-- | Return the number of elements in an array.
 sizeOfArr :: Prim a => Arr a -> Int
 sizeOfArr (Arr n _) = n
 
 {-# INLINE readArrIO #-}
+-- | Read an array element in 'IO'.
 readArrIO :: Prim a => Arr a -> Int -> IO a
 readArrIO (Arr _ arr) i = readPrimArray arr i
 
 {-# INLINE writeArrIO #-}
+-- | Write an array element in 'IO'.
 writeArrIO :: Prim a => Arr a -> Int -> a -> IO ()
 writeArrIO (Arr _ arr) i x = writePrimArray arr i x
 
+-- | Allocate and populate an array from a list.
 fromList :: Prim a => [a] -> IO (Arr a)
 fromList xs = do
   let !n = length xs
@@ -700,6 +732,7 @@ fromList xs = do
       go !i (y : ys) = writeArrIO arr i y >> go (i + 1) ys
   go 0 xs
 
+-- | Freeze the current contents of an array into a list.
 toList :: Prim a => Arr a -> IO [a]
 toList arr = go 0
   where
@@ -712,6 +745,7 @@ toList arr = go 0
           pure (x : xs)
 
 {-# INLINE runProg #-}
+-- | Run a Loom program in 'IO'.
 runProg :: Prog a -> IO a
 runProg (Prog m) = runKernel (m pure) (Runtime Nothing Nothing 0)
 
@@ -1147,6 +1181,7 @@ boundingBoxAffine2D affine rect@(Rect2 rowLo colLo rowHi colHi)
         in Rect2 rowMin colMin (rowMax + 1) (colMax + 1)
 
 {-# INLINE vecWidth #-}
+-- | The logical lane count used by the portable vector APIs.
 vecWidth :: Int
 vecWidth = 4
 
@@ -1385,6 +1420,7 @@ writeIVecIO (MutablePrimArray mba#) (I# i#) vec =
 #endif
 
 {-# INLINE broadcastIVec #-}
+-- | Broadcast one integer across an 'IVec'.
 broadcastIVec :: Int -> IVec
 broadcastIVec (I# x#) =
 #if WORD_SIZE_IN_BITS == 64
@@ -1396,6 +1432,7 @@ broadcastIVec (I# x#) =
 #endif
 
 {-# INLINE addIVec #-}
+-- | Add two integer SIMD vectors elementwise.
 addIVec :: IVec -> IVec -> IVec
 addIVec left right =
 #if WORD_SIZE_IN_BITS == 64
@@ -1415,6 +1452,7 @@ addIVec left right =
 #endif
 
 {-# INLINE mulIVec #-}
+-- | Multiply two integer SIMD vectors elementwise.
 mulIVec :: IVec -> IVec -> IVec
 mulIVec left right =
 #if WORD_SIZE_IN_BITS == 64
@@ -1434,6 +1472,7 @@ mulIVec left right =
 #endif
 
 {-# INLINE sumIVec #-}
+-- | Sum the lanes of an integer SIMD vector.
 sumIVec :: IVec -> Int
 sumIVec vec =
 #if WORD_SIZE_IN_BITS == 64
@@ -1523,20 +1562,24 @@ writeI32VecIO (MutablePrimArray mba#) (I# i#) (I32Vec v) =
         (# s1, () #)
 
 {-# INLINE broadcastI32Vec #-}
+-- | Broadcast one 'Int32' across an 'I32Vec'.
 broadcastI32Vec :: Int32 -> I32Vec
 broadcastI32Vec (I32# x#) = I32Vec (broadcastInt32X4# x#)
 
 {-# INLINE addI32Vec #-}
+-- | Add two 'Int32' SIMD vectors elementwise.
 addI32Vec :: I32Vec -> I32Vec -> I32Vec
 addI32Vec (I32Vec leftV) (I32Vec rightV) =
   I32Vec (plusInt32X4# leftV rightV)
 
 {-# INLINE mulI32Vec #-}
+-- | Multiply two 'Int32' SIMD vectors elementwise.
 mulI32Vec :: I32Vec -> I32Vec -> I32Vec
 mulI32Vec (I32Vec leftV) (I32Vec rightV) =
   I32Vec (timesInt32X4# leftV rightV)
 
 {-# INLINE sumI32Vec #-}
+-- | Sum the lanes of an 'Int32' SIMD vector.
 sumI32Vec :: I32Vec -> Int32
 sumI32Vec (I32Vec v) =
   case unpackInt32X4# v of
@@ -1644,10 +1687,12 @@ writeDVecIO (MutablePrimArray mba#) (I# i#) (DVec lo hi) =
             (# s2, () #)
 
 {-# INLINE broadcastDVec #-}
+-- | Broadcast one 'Double' across a DVec.
 broadcastDVec :: Double -> DVec
 broadcastDVec (D# x#) = DVec (broadcastDoubleX2# x#) (broadcastDoubleX2# x#)
 
 {-# INLINE addDVec #-}
+-- | Add two 'Double' SIMD vectors elementwise.
 addDVec :: DVec -> DVec -> DVec
 addDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
   DVec
@@ -1655,6 +1700,7 @@ addDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
     (plusDoubleX2# leftHi rightHi)
 
 {-# INLINE mulDVec #-}
+-- | Multiply two 'Double' SIMD vectors elementwise.
 mulDVec :: DVec -> DVec -> DVec
 mulDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
   DVec
@@ -1662,6 +1708,7 @@ mulDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
     (timesDoubleX2# leftHi rightHi)
 
 {-# INLINE sumDVec #-}
+-- | Sum the lanes of a DVec.
 sumDVec :: DVec -> Double
 sumDVec (DVec lo hi) =
   case plusDoubleX2# lo hi of
@@ -1671,6 +1718,7 @@ sumDVec (DVec lo hi) =
           D# (s0# +## s1#)
 
 {-# INLINE broadcastVec #-}
+-- | Broadcast one scalar value across a generic vector.
 broadcastVec :: VecOps a => a -> Vec a
 broadcastVec = broadcastVecIO
 {-# SPECIALIZE INLINE broadcastVec :: Int -> Vec Int #-}
@@ -1678,6 +1726,7 @@ broadcastVec = broadcastVecIO
 {-# SPECIALIZE INLINE broadcastVec :: Double -> Vec Double #-}
 
 {-# INLINE addVec #-}
+-- | Add two generic vectors elementwise.
 addVec :: VecOps a => Vec a -> Vec a -> Vec a
 addVec = addVecIO
 {-# SPECIALIZE INLINE addVec :: Vec Int -> Vec Int -> Vec Int #-}
@@ -1685,6 +1734,7 @@ addVec = addVecIO
 {-# SPECIALIZE INLINE addVec :: Vec Double -> Vec Double -> Vec Double #-}
 
 {-# INLINE mulVec #-}
+-- | Multiply two generic vectors elementwise.
 mulVec :: VecOps a => Vec a -> Vec a -> Vec a
 mulVec = mulVecIO
 {-# SPECIALIZE INLINE mulVec :: Vec Int -> Vec Int -> Vec Int #-}
@@ -1692,6 +1742,7 @@ mulVec = mulVecIO
 {-# SPECIALIZE INLINE mulVec :: Vec Double -> Vec Double -> Vec Double #-}
 
 {-# INLINE sumVec #-}
+-- | Sum all lanes of a generic vector.
 sumVec :: VecOps a => Vec a -> a
 sumVec = sumVecIO
 {-# SPECIALIZE INLINE sumVec :: Vec Int -> Int #-}
@@ -1699,16 +1750,19 @@ sumVec = sumVecIO
 {-# SPECIALIZE INLINE sumVec :: Vec Double -> Double #-}
 
 {-# INLINE parallel #-}
+-- | Mark a program region as an outer parallel section.
 parallel :: Prog a -> Prog a
 parallel body = Prog $ \k -> loopParallel (unProg body k)
 
 {-# INLINE barrier #-}
+-- | Synchronize workers inside a parallel region.
 barrier :: Prog ()
 barrier = Prog $ \k -> do
   loopBarrier
   k ()
 
 {-# INLINE parFor #-}
+-- | Run a one-dimensional parallel loop from @0@ to @n - 1@.
 parFor :: Int -> (Int -> Prog ()) -> Prog ()
 parFor n body = Prog $ \k -> do
   loopParFor n (\i -> unProg (body i) (\() -> pure ()))
@@ -2095,6 +2149,7 @@ tiledFor3D tileDepth tileRows tileCols shape body =
     parForTile3D tileDepth tileRows tileCols depth0 row0 col0 shape body
 
 {-# INLINE stripMine #-}
+-- | Split a one-dimensional loop into a full-width body and a tail body.
 stripMine :: Int -> Int -> (Int -> Prog ()) -> (Int -> Prog ()) -> Prog ()
 stripMine width n fullBody tailBody
   | width <= 0 = invalidProgUsage "stripMine requires a positive chunk width"
@@ -2110,16 +2165,19 @@ stripMine width n fullBody tailBody
     !tailCount = n - tailStart
 
 {-# INLINE readArr #-}
+-- | Read an array element inside a Loom program.
 readArr :: Prim a => Arr a -> Int -> Prog a
 readArr arr i = Prog $ \k -> loopReadArr arr i >>= k
 
 {-# INLINE writeArr #-}
+-- | Write an array element inside a Loom program.
 writeArr :: Prim a => Arr a -> Int -> a -> Prog ()
 writeArr arr i x = Prog $ \k -> do
   loopWriteArr arr i x
   k ()
 
 {-# INLINE readVec #-}
+-- | Read a generic vector value starting at the given array offset.
 readVec :: VecOps a => Arr a -> Int -> Prog (Vec a)
 readVec arr i = Prog $ \k -> loopReadVec arr i >>= k
 {-# SPECIALIZE INLINE readVec :: Arr Int -> Int -> Prog (Vec Int) #-}
@@ -2127,18 +2185,22 @@ readVec arr i = Prog $ \k -> loopReadVec arr i >>= k
 {-# SPECIALIZE INLINE readVec :: Arr Double -> Int -> Prog (Vec Double) #-}
 
 {-# INLINE readIVec #-}
+-- | Read an integer SIMD vector starting at the given array offset.
 readIVec :: Arr Int -> Int -> Prog IVec
 readIVec arr i = Prog $ \k -> loopReadIVec arr i >>= k
 
 {-# INLINE readI32Vec #-}
+-- | Read an 'Int32' SIMD vector starting at the given array offset.
 readI32Vec :: Arr Int32 -> Int -> Prog I32Vec
 readI32Vec arr i = Prog $ \k -> loopReadI32Vec arr i >>= k
 
 {-# INLINE readDVec #-}
+-- | Read a 'Double' SIMD vector starting at the given array offset.
 readDVec :: Arr Double -> Int -> Prog DVec
 readDVec arr i = Prog $ \k -> loopReadDVec arr i >>= k
 
 {-# INLINE writeVec #-}
+-- | Write a generic vector value starting at the given array offset.
 writeVec :: VecOps a => Arr a -> Int -> Vec a -> Prog ()
 writeVec arr i vec = Prog $ \k -> do
   loopWriteVec arr i vec
@@ -2148,90 +2210,107 @@ writeVec arr i vec = Prog $ \k -> do
 {-# SPECIALIZE INLINE writeVec :: Arr Double -> Int -> Vec Double -> Prog () #-}
 
 {-# INLINE writeIVec #-}
+-- | Write an integer SIMD vector starting at the given array offset.
 writeIVec :: Arr Int -> Int -> IVec -> Prog ()
 writeIVec arr i vec = Prog $ \k -> do
   loopWriteIVec arr i vec
   k ()
 
 {-# INLINE writeI32Vec #-}
+-- | Write an 'Int32' SIMD vector starting at the given array offset.
 writeI32Vec :: Arr Int32 -> Int -> I32Vec -> Prog ()
 writeI32Vec arr i vec = Prog $ \k -> do
   loopWriteI32Vec arr i vec
   k ()
 
 {-# INLINE writeDVec #-}
+-- | Write a 'Double' SIMD vector starting at the given array offset.
 writeDVec :: Arr Double -> Int -> DVec -> Prog ()
 writeDVec arr i vec = Prog $ \k -> do
   loopWriteDVec arr i vec
   k ()
 
 {-# INLINE newReducer #-}
+-- | Allocate a reducer variable for the duration of a program region.
 newReducer :: Reducer a -> (RedVar a -> Prog r) -> Prog r
 newReducer reducer body = Prog $ \k ->
   loopNewReducer reducer (\redVar -> unProg (body redVar) k)
 
 {-# INLINE reduce #-}
+-- | Contribute one value to a reducer.
 reduce :: RedVar a -> a -> Prog ()
 reduce redVar x = Prog $ \k -> do
   loopReduce redVar x
   k ()
 
 {-# INLINE getReducer #-}
+-- | Read the final value of a reducer.
 getReducer :: RedVar a -> Prog a
 getReducer redVar = Prog $ \k -> loopGetReducer redVar >>= k
 
 {-# INLINE accumFor #-}
+-- | Run a sequential accumulation loop in a program.
 accumFor :: Int -> a -> (a -> Int -> Prog a) -> Prog a
 accumFor n initial body =
   Prog $ \k -> loopAccumFor n initial (\acc i -> unProg (body acc i) pure) >>= k
 
 {-# INLINE accumVecFor #-}
+-- | Run a sequential accumulation loop over generic vector state.
 accumVecFor :: VecAccum a => Int -> Vec a -> (Vec a -> Int -> Prog (Vec a)) -> Prog (Vec a)
 accumVecFor n initial body =
   Prog $ \k -> loopAccumVecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
 
 {-# INLINE accumIVecFor #-}
+-- | Run a sequential accumulation loop over integer SIMD state.
 accumIVecFor :: Int -> IVec -> (IVec -> Int -> Prog IVec) -> Prog IVec
 accumIVecFor n initial body =
   Prog $ \k -> loopAccumIVecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
 
 {-# INLINE accumI32VecFor #-}
+-- | Run a sequential accumulation loop over 'Int32' SIMD state.
 accumI32VecFor :: Int -> I32Vec -> (I32Vec -> Int -> Prog I32Vec) -> Prog I32Vec
 accumI32VecFor n initial body =
   Prog $ \k -> loopAccumI32VecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
 
 {-# INLINE accumDVecFor #-}
+-- | Run a sequential accumulation loop over 'Double' SIMD state.
 accumDVecFor :: Int -> DVec -> (DVec -> Int -> Prog DVec) -> Prog DVec
 accumDVecFor n initial body =
   Prog $ \k -> loopAccumDVecFor n initial (\acc i -> unProg (body acc i) pure) >>= k
 
 {-# INLINE newAcc #-}
+-- | Allocate a mutable scalar accumulator for the duration of a program region.
 newAcc :: Prim a => a -> (AccVar a -> Prog r) -> Prog r
 newAcc initial body = Prog $ \k ->
   loopNewAcc initial (\accVar -> unProg (body accVar) k)
 
 {-# INLINE readAcc #-}
+-- | Read the current value of an accumulator.
 readAcc :: Prim a => AccVar a -> Prog a
 readAcc accVar = Prog $ \k -> loopReadAcc accVar >>= k
 
 {-# INLINE writeAcc #-}
+-- | Overwrite the current value of an accumulator.
 writeAcc :: Prim a => AccVar a -> a -> Prog ()
 writeAcc accVar x = Prog $ \k -> do
   loopWriteAcc accVar x
   k ()
 
 {-# INLINE foldFor #-}
+-- | Reduce the values produced by a loop with the given reducer.
 foldFor :: Reducer a -> Int -> (Int -> Prog a) -> Prog a
 foldFor reducer n body =
   Prog $ \k -> loopFoldFor reducer n (\i -> unProg (body i) pure) >>= k
 
 {-# INLINE mkReducer #-}
+-- | Build a reducer from an initial state, a step function, and a finalizer.
 mkReducer :: Prim rep => rep -> (rep -> a -> rep) -> (rep -> a) -> Reducer a
 mkReducer initial step done = mkReducerWith initial step merge done
   where
     merge !left !right = step left (done right)
 
 {-# INLINE mkReducerWith #-}
+-- | Build a reducer with an explicit merge function.
 mkReducerWith ::
   Prim rep =>
   rep ->
@@ -2249,6 +2328,7 @@ mkReducerWith initial step merge done =
       }
 
 {-# INLINE intSum #-}
+-- | Sum integer values.
 intSum :: Reducer Int
 intSum = mkReducerWith 0 step merge id
   where
@@ -2256,6 +2336,7 @@ intSum = mkReducerWith 0 step merge id
     merge !left !right = left + right
 
 {-# INLINE int32Sum #-}
+-- | Sum 'Int32' values.
 int32Sum :: Reducer Int32
 int32Sum = mkReducerWith 0 step merge id
   where
@@ -2263,6 +2344,7 @@ int32Sum = mkReducerWith 0 step merge id
     merge !left !right = left + right
 
 {-# INLINE doubleSum #-}
+-- | Sum 'Double' values.
 doubleSum :: Reducer Double
 doubleSum = mkReducerWith 0 step merge id
   where

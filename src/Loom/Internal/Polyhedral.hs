@@ -65,20 +65,24 @@ import Loom.Internal.Kernel
   , withIx2
   )
 
+-- | Variables that may appear in a 2D affine expression.
 data AffineVar
   = LoopRow
   | LoopCol
   | AuxVar String
   deriving (Eq, Ord, Show)
 
+-- | A 2D affine expression in row and column variables plus an offset.
 data AffineExpr = AffineExpr ![(AffineVar, Int)] !Int
   deriving (Eq, Show)
 
+-- | The kind of array access performed by a phase.
 data AccessKind
   = ReadAccess
   | WriteAccess
   deriving (Eq, Show)
 
+-- | A named 2D array access with an affine index expression.
 data Access2D = Access2D
   { accessKind :: !AccessKind
   , accessArray :: !String
@@ -86,6 +90,7 @@ data Access2D = Access2D
   }
   deriving (Eq, Show)
 
+-- | The dependence information attached to a phase.
 data Dependence2D
   = IndependentDependence2D
   | WavefrontDependence2D
@@ -99,8 +104,10 @@ data ScheduleStage2D
   | ScheduleTileStage2D !Int !Int
   | ScheduleWavefrontStage2D
 
+-- | A 2D schedule description.
 newtype Schedule2D = Schedule2D [ScheduleStage2D]
 
+-- | A rendered summary of one kernel phase.
 data PhaseSummary2D = PhaseSummary2D
   { phaseSummaryName :: !String
   , phaseSummarySchedule :: !Schedule2D
@@ -109,11 +116,13 @@ data PhaseSummary2D = PhaseSummary2D
   , phaseSummaryDependence :: !Dependence2D
   }
 
+-- | A rendered summary of a whole kernel.
 data KernelSummary2D = KernelSummary2D
   { kernelSummaryShape :: !Sh2
   , kernelSummaryPhases :: ![PhaseSummary2D]
   }
 
+-- | The public legality result for a 2D kernel.
 data Legality2D
   = Legal
   | NeedsPrivatization ![String]
@@ -140,11 +149,13 @@ data KernelAnalysis2D = KernelAnalysis2D
   , kernelAnalysisPhases :: ![PhaseAnalysis2D]
   }
 
+-- | Errors raised while building or validating a polyhedral kernel.
 data PolyhedralError
   = InvalidSchedule2D String
   | IllegalDependence2D String
   deriving (Eq, Show)
 
+-- | One phase of a 2D polyhedral kernel.
 data Phase2D = Phase2D
   { phaseName :: !String
   , phaseSchedule :: !Schedule2D
@@ -154,6 +165,7 @@ data Phase2D = Phase2D
   , phaseLowerBody :: !(Int -> Int -> Prog ())
   }
 
+-- | A 2D polyhedral kernel over a fixed shape.
 data Kernel2D = Kernel2D !Sh2 ![Phase2D]
 
 data ValidatedPhase2D = ValidatedPhase2D
@@ -161,27 +173,34 @@ data ValidatedPhase2D = ValidatedPhase2D
   , validatedPhaseBody :: !(Int -> Int -> Prog ())
   }
 
+-- | The loop row variable.
 rowVar :: AffineExpr
 rowVar = AffineExpr [(LoopRow, 1)] 0
 
+-- | The loop column variable.
 colVar :: AffineExpr
 colVar = AffineExpr [(LoopCol, 1)] 0
 
+-- | An auxiliary symbolic variable.
 auxVar :: String -> AffineExpr
 auxVar name = AffineExpr [(AuxVar name, 1)] 0
 
+-- | A constant affine expression.
 constant :: Int -> AffineExpr
 constant n = AffineExpr [] n
 
+-- | Scale an affine expression by an integer coefficient.
 scaled :: Int -> AffineExpr -> AffineExpr
 scaled k (AffineExpr coeffs offset)
   | k == 0 = constant 0
   | otherwise = AffineExpr (normalizeTerms [(var, k * coeff) | (var, coeff) <- coeffs]) (k * offset)
 
+-- | Add two affine expressions.
 plus :: AffineExpr -> AffineExpr -> AffineExpr
 plus (AffineExpr left leftOffset) (AffineExpr right rightOffset) =
   AffineExpr (normalizeTerms (left ++ right)) (leftOffset + rightOffset)
 
+-- | Render an affine expression in a compact textual form.
 renderAffineExpr :: AffineExpr -> String
 renderAffineExpr (AffineExpr coeffs offset) =
   case filter (/= "") (map renderTerm coeffs ++ [renderOffset offset]) of
@@ -209,12 +228,15 @@ renderVar LoopRow = "row"
 renderVar LoopCol = "col"
 renderVar (AuxVar name) = name
 
+-- | Build a named read access.
 readAccess2D :: String -> AffineExpr -> Access2D
 readAccess2D name expr = Access2D ReadAccess name expr
 
+-- | Build a named write access.
 writeAccess2D :: String -> AffineExpr -> Access2D
 writeAccess2D name expr = Access2D WriteAccess name expr
 
+-- | Render a 2D access description.
 renderAccess2D :: Access2D -> String
 renderAccess2D (Access2D kind name expr) =
   renderKind kind ++ " " ++ name ++ "[" ++ renderAffineExpr expr ++ "]"
@@ -222,22 +244,28 @@ renderAccess2D (Access2D kind name expr) =
     renderKind ReadAccess = "read"
     renderKind WriteAccess = "write"
 
+-- | The default 2D traversal order.
 identitySchedule2D :: Schedule2D
 identitySchedule2D = Schedule2D []
 
+-- | Build a 2D affine schedule.
 affineSchedule2D :: Affine2 -> Schedule2D
 affineSchedule2D affine = Schedule2D [ScheduleAffineStage2D affine]
 
+-- | Build a tiled 2D schedule.
 tileSchedule2D :: Int -> Int -> Schedule2D
 tileSchedule2D tileRows tileCols = Schedule2D [ScheduleTileStage2D tileRows tileCols]
 
+-- | Build a wavefront 2D schedule.
 wavefrontSchedule2D :: Schedule2D
 wavefrontSchedule2D = Schedule2D [ScheduleWavefrontStage2D]
 
+-- | Compose two 2D schedules from left to right.
 composeSchedule2D :: Schedule2D -> Schedule2D -> Schedule2D
 composeSchedule2D (Schedule2D left) (Schedule2D right) =
   Schedule2D (left ++ right)
 
+-- | Render a 2D schedule in a compact textual form.
 renderSchedule2D :: Schedule2D -> String
 renderSchedule2D (Schedule2D stages) =
   case normalizeScheduleStages stages of
@@ -250,6 +278,7 @@ renderSchedule2D (Schedule2D stages) =
       "tile(" ++ show tileRows ++ "," ++ show tileCols ++ ")"
     renderStage ScheduleWavefrontStage2D = "wavefront"
 
+-- | Build one phase of a 2D kernel.
 phase2D ::
   String ->
   Schedule2D ->
@@ -261,13 +290,16 @@ phase2D ::
 phase2D name schedule dependence phaseReads' phaseWrites' body =
   Phase2D name schedule phaseReads' phaseWrites' dependence body
 
+-- | Build a 2D kernel from its shape and phases.
 kernel2D :: Sh2 -> [Phase2D] -> Kernel2D
 kernel2D = Kernel2D
 
+-- | Summarize a kernel without performing legality checks.
 summarizeKernel2D :: Kernel2D -> KernelSummary2D
 summarizeKernel2D (Kernel2D shape phases) =
   KernelSummary2D shape (map summarizePhase2D phases)
 
+-- | Analyze whether a kernel is legal to lower as written.
 analyzeKernel2D :: Kernel2D -> Either PolyhedralError Legality2D
 analyzeKernel2D =
   fmap collapseKernelLegality2D . analyzeKernelDetails2D
@@ -282,12 +314,14 @@ analyzeKernelDetails2D (Kernel2D shape phases) = do
         }
     )
 
+-- | Validate that every phase in a kernel is legal.
 validateKernel2D :: Kernel2D -> Either PolyhedralError KernelSummary2D
 validateKernel2D kernel = do
   analysis <- analyzeKernelDetails2D kernel
   mapM_ ensureLegalPhase2D (kernelAnalysisPhases analysis)
   pure (kernelAnalysisSummary analysis)
 
+-- | Lower a validated kernel into an executable Loom program.
 lowerKernel2D :: Kernel2D -> Either PolyhedralError (Prog ())
 lowerKernel2D (Kernel2D shape phases) = do
   analysis <- analyzeKernelDetails2D (Kernel2D shape phases)
