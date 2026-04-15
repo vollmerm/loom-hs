@@ -961,6 +961,11 @@ testPolyhedralSummary = do
           assertEqual "polyhedral schedule summary" "tile(2,3)" (Poly.renderSchedule2D (Poly.phaseSummarySchedule phaseSummary))
           assertEqual "polyhedral access summary" "read src[4*row + col]" (Poly.renderAccess2D access)
         _ -> error "expected one polyhedral phase summary"
+  case Poly.analyzeKernel2D kernel of
+    Left err ->
+      error ("unexpected polyhedral legality analysis failure: " ++ show err)
+    Right legality ->
+      assertEqual "polyhedral legal analysis" Poly.Legal legality
 
 testPolyhedralLegality :: IO ()
 testPolyhedralLegality = do
@@ -1019,14 +1024,11 @@ testPolyhedralAnalysisPrivatization = do
   case Poly.analyzeKernel2D kernel of
     Left err ->
       error ("unexpected polyhedral analysis failure: " ++ show err)
-    Right analysis ->
-      case Poly.kernelAnalysisPhases analysis of
-        [phaseAnalysis] ->
-          assertEqual
-            "polyhedral privatization analysis"
-            (Poly.RequiresPrivatization2D ["scratch"])
-            (Poly.phaseAnalysisLegality phaseAnalysis)
-        _ -> error "expected one analyzed polyhedral phase"
+    Right legality ->
+      assertEqual
+        "polyhedral privatization analysis"
+        (Poly.NeedsPrivatization ["scratch"])
+        legality
   case Poly.validateKernel2D kernel of
     Left err ->
       assertEqual
@@ -1052,14 +1054,11 @@ testPolyhedralAnalysisReduction = do
   case Poly.analyzeKernel2D kernel of
     Left err ->
       error ("unexpected polyhedral analysis failure: " ++ show err)
-    Right analysis ->
-      case Poly.kernelAnalysisPhases analysis of
-        [phaseAnalysis] ->
-          assertEqual
-            "polyhedral reduction analysis"
-            (Poly.RequiresReductionRecognition2D ["sum"])
-            (Poly.phaseAnalysisLegality phaseAnalysis)
-        _ -> error "expected one analyzed polyhedral phase"
+    Right legality ->
+      assertEqual
+        "polyhedral reduction analysis"
+        (Poly.NeedsReductionRecognition ["sum"])
+        legality
 
 testPolyhedralAnalysisInsufficientMetadata :: IO ()
 testPolyhedralAnalysisInsufficientMetadata = do
@@ -1078,14 +1077,11 @@ testPolyhedralAnalysisInsufficientMetadata = do
   case Poly.analyzeKernel2D kernel of
     Left err ->
       error ("unexpected polyhedral analysis failure: " ++ show err)
-    Right analysis ->
-      case Poly.kernelAnalysisPhases analysis of
-        [phaseAnalysis] ->
-          assertEqual
-            "polyhedral insufficient metadata analysis"
-            (Poly.InsufficientMetadata2D "transformed schedule touches arr at non-identical read/write locations")
-            (Poly.phaseAnalysisLegality phaseAnalysis)
-        _ -> error "expected one analyzed polyhedral phase"
+    Right legality ->
+      assertEqual
+        "polyhedral insufficient metadata analysis"
+        (Poly.InsufficientMetadata "phase stencilish has insufficient metadata: transformed schedule touches arr at non-identical read/write locations")
+        legality
   case Poly.lowerKernel2D kernel of
     Left err ->
       assertEqual
@@ -1127,6 +1123,14 @@ testPolyhedralWavefrontLegality = do
         err
     Right _ ->
       error "invalid wavefront polyhedral schedule should fail"
+  case Poly.analyzeKernel2D invalidKernel of
+    Left err ->
+      error ("unexpected invalid-kernel legality analysis failure: " ++ show err)
+    Right legality ->
+      assertEqual
+        "polyhedral wavefront analysis"
+        (Poly.Illegal "phase wavefront+tiled is illegal: wavefront dependences require the exact wavefront schedule in the MVP subset")
+        legality
   case Poly.validateKernel2D identityOpaqueKernel of
     Left err ->
       error ("identity opaque polyhedral schedule should validate: " ++ show err)

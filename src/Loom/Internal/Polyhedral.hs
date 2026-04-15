@@ -9,9 +9,7 @@ module Loom.Internal.Polyhedral
   , Schedule2D
   , PhaseSummary2D (..)
   , KernelSummary2D (..)
-  , TransformLegality2D (..)
-  , PhaseAnalysis2D (..)
-  , KernelAnalysis2D (..)
+  , Legality2D (..)
   , PolyhedralError (..)
   , Phase2D
   , Kernel2D
@@ -115,6 +113,14 @@ data KernelSummary2D = KernelSummary2D
   { kernelSummaryShape :: !Sh2
   , kernelSummaryPhases :: ![PhaseSummary2D]
   }
+
+data Legality2D
+  = Legal
+  | NeedsPrivatization ![String]
+  | NeedsReductionRecognition ![String]
+  | InsufficientMetadata !String
+  | Illegal !String
+  deriving (Eq, Show)
 
 data TransformLegality2D
   = LegalTransform2D
@@ -260,8 +266,12 @@ summarizeKernel2D :: Kernel2D -> KernelSummary2D
 summarizeKernel2D (Kernel2D shape phases) =
   KernelSummary2D shape (map summarizePhase2D phases)
 
-analyzeKernel2D :: Kernel2D -> Either PolyhedralError KernelAnalysis2D
-analyzeKernel2D (Kernel2D shape phases) = do
+analyzeKernel2D :: Kernel2D -> Either PolyhedralError Legality2D
+analyzeKernel2D =
+  fmap collapseKernelLegality2D . analyzeKernelDetails2D
+
+analyzeKernelDetails2D :: Kernel2D -> Either PolyhedralError KernelAnalysis2D
+analyzeKernelDetails2D (Kernel2D shape phases) = do
   analyzed <- mapM analyzePhase2D phases
   pure
     ( KernelAnalysis2D
@@ -272,13 +282,13 @@ analyzeKernel2D (Kernel2D shape phases) = do
 
 validateKernel2D :: Kernel2D -> Either PolyhedralError KernelSummary2D
 validateKernel2D kernel = do
-  analysis <- analyzeKernel2D kernel
+  analysis <- analyzeKernelDetails2D kernel
   mapM_ ensureLegalPhase2D (kernelAnalysisPhases analysis)
   pure (kernelAnalysisSummary analysis)
 
 lowerKernel2D :: Kernel2D -> Either PolyhedralError (Prog ())
 lowerKernel2D (Kernel2D shape phases) = do
-  analysis <- analyzeKernel2D (Kernel2D shape phases)
+  analysis <- analyzeKernelDetails2D (Kernel2D shape phases)
   mapM_ ensureLegalPhase2D (kernelAnalysisPhases analysis)
   validatedPhases <- mapM validatePhase2D phases
   pure (go shape validatedPhases)
@@ -368,6 +378,82 @@ ensureLegalPhase2D phaseAnalysis =
       Left (IllegalDependence2D (phaseNameText ++ " is illegal: " ++ message))
   where
     phaseNameText = "phase " ++ phaseSummaryName (phaseAnalysisSummary phaseAnalysis)
+
+collapseKernelLegality2D :: KernelAnalysis2D -> Legality2D
+collapseKernelLegality2D analysis =
+  case firstPhaseLegality illegalPhase of
+    Just legality ->
+      legality
+    Nothing ->
+      case firstPhaseLegality insufficientPhase of
+        Just legality ->
+          legality
+        Nothing ->
+          case (reductionNeeds, privatizationNeeds) of
+            ([], []) ->
+              Legal
+            ([], arrays) ->
+              NeedsPrivatization arrays
+            (reducers, []) ->
+              NeedsReductionRecognition reducers
+            (reducers, arrays) ->
+              Illegal
+                ( "kernel requires multiple legality preconditions: reduction recognition for "
+                    ++ intercalate ", " reducers
+                    ++ "; privatization of "
+                    ++ intercalate ", " arrays
+                )
+  where
+    phases = kernelAnalysisPhases analysis
+
+    illegalPhase phaseAnalysis =
+      case phaseAnalysisLegality phaseAnalysis of
+        IllegalTransform2D message ->
+          Just (Illegal (phaseIssueText phaseAnalysis ("is illegal: " ++ message)))
+        _ ->
+          Nothing
+
+    insufficientPhase phaseAnalysis =
+      case phaseAnalysisLegality phaseAnalysis of
+        InsufficientMetadata2D message ->
+          Just (InsufficientMetadata (phaseIssueText phaseAnalysis ("has insufficient metadata: " ++ message)))
+        _ ->
+          Nothing
+
+    reductionNeeds =
+      uniqueNames
+        [ reducers
+        | phaseAnalysis <- phases
+        , RequiresReductionRecognition2D reducers <- [phaseAnalysisLegality phaseAnalysis]
+        ]
+
+    privatizationNeeds =
+      uniqueNames
+        [ arrays
+        | phaseAnalysis <- phases
+        , RequiresPrivatization2D arrays <- [phaseAnalysisLegality phaseAnalysis]
+        ]
+
+    firstPhaseLegality classify = go phases
+      where
+        go [] = Nothing
+        go (phaseAnalysis : rest) =
+          case classify phaseAnalysis of
+            Just legality -> Just legality
+            Nothing -> go rest
+
+phaseIssueText :: PhaseAnalysis2D -> String -> String
+phaseIssueText phaseAnalysis suffix =
+  "phase " ++ phaseSummaryName (phaseAnalysisSummary phaseAnalysis) ++ " " ++ suffix
+
+uniqueNames :: [[String]] -> [String]
+uniqueNames = dedupeSorted . concat
+
+dedupeSorted :: [String] -> [String]
+dedupeSorted = go . sortOn id
+  where
+    go [] = []
+    go (x : xs) = x : go (dropWhile (== x) xs)
 
 analyzeLegality2D :: PhaseSummary2D -> Dependence2D -> [ScheduleStage2D] -> TransformLegality2D
 analyzeLegality2D summary dependence stages =
