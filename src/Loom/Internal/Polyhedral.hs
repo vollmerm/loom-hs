@@ -9,6 +9,9 @@ module Loom.Internal.Polyhedral
   , Schedule2D
   , PhaseSummary2D (..)
   , KernelSummary2D (..)
+  , TransformLegality2D (..)
+  , PhaseAnalysis2D (..)
+  , KernelAnalysis2D (..)
   , PolyhedralError (..)
   , Phase2D
   , Kernel2D
@@ -31,11 +34,12 @@ module Loom.Internal.Polyhedral
   , phase2D
   , kernel2D
   , summarizeKernel2D
+  , analyzeKernel2D
   , validateKernel2D
   , lowerKernel2D
   ) where
 
-import Data.List (sortOn)
+import Data.List (intercalate, sortOn)
 import Loom.Internal.Kernel
   ( Affine2
   , AffineN
@@ -87,6 +91,8 @@ data Access2D = Access2D
 data Dependence2D
   = IndependentDependence2D
   | WavefrontDependence2D
+  | PrivatizableDependence2D ![String]
+  | ReductionDependence2D ![String]
   | OpaqueDependence2D String
   deriving (Eq, Show)
 
@@ -108,6 +114,24 @@ data PhaseSummary2D = PhaseSummary2D
 data KernelSummary2D = KernelSummary2D
   { kernelSummaryShape :: !Sh2
   , kernelSummaryPhases :: ![PhaseSummary2D]
+  }
+
+data TransformLegality2D
+  = LegalTransform2D
+  | RequiresPrivatization2D ![String]
+  | RequiresReductionRecognition2D ![String]
+  | InsufficientMetadata2D !String
+  | IllegalTransform2D !String
+  deriving (Eq, Show)
+
+data PhaseAnalysis2D = PhaseAnalysis2D
+  { phaseAnalysisSummary :: !PhaseSummary2D
+  , phaseAnalysisLegality :: !TransformLegality2D
+  }
+
+data KernelAnalysis2D = KernelAnalysis2D
+  { kernelAnalysisSummary :: !KernelSummary2D
+  , kernelAnalysisPhases :: ![PhaseAnalysis2D]
   }
 
 data PolyhedralError
@@ -236,13 +260,26 @@ summarizeKernel2D :: Kernel2D -> KernelSummary2D
 summarizeKernel2D (Kernel2D shape phases) =
   KernelSummary2D shape (map summarizePhase2D phases)
 
+analyzeKernel2D :: Kernel2D -> Either PolyhedralError KernelAnalysis2D
+analyzeKernel2D (Kernel2D shape phases) = do
+  analyzed <- mapM analyzePhase2D phases
+  pure
+    ( KernelAnalysis2D
+        { kernelAnalysisSummary = KernelSummary2D shape (map phaseAnalysisSummary analyzed)
+        , kernelAnalysisPhases = analyzed
+        }
+    )
+
 validateKernel2D :: Kernel2D -> Either PolyhedralError KernelSummary2D
-validateKernel2D (Kernel2D shape phases) = do
-  validated <- mapM validatePhase2D phases
-  pure (KernelSummary2D shape (map validatedPhaseSummary validated))
+validateKernel2D kernel = do
+  analysis <- analyzeKernel2D kernel
+  mapM_ ensureLegalPhase2D (kernelAnalysisPhases analysis)
+  pure (kernelAnalysisSummary analysis)
 
 lowerKernel2D :: Kernel2D -> Either PolyhedralError (Prog ())
 lowerKernel2D (Kernel2D shape phases) = do
+  analysis <- analyzeKernel2D (Kernel2D shape phases)
+  mapM_ ensureLegalPhase2D (kernelAnalysisPhases analysis)
   validatedPhases <- mapM validatePhase2D phases
   pure (go shape validatedPhases)
   where
@@ -269,8 +306,23 @@ validatePhase2D phase = do
   let summary = summarizePhase2D phase
       stages = unwrapSchedule2D (phaseSummarySchedule summary)
   mapM_ validateStage2D stages
-  validateDependence2D (phaseDependence phase) stages
   pure (ValidatedPhase2D summary (phaseLowerBody phase))
+
+analyzePhase2D :: Phase2D -> Either PolyhedralError PhaseAnalysis2D
+analyzePhase2D phase = do
+  let summary = summarizePhase2D phase
+      stages = unwrapSchedule2D (phaseSummarySchedule summary)
+  mapM_ validateStage2D stages
+  pure
+    ( PhaseAnalysis2D
+        { phaseAnalysisSummary = summary
+        , phaseAnalysisLegality =
+            analyzeLegality2D
+              summary
+              (phaseDependence phase)
+              stages
+        }
+    )
 
 validateStage2D :: ScheduleStage2D -> Either PolyhedralError ()
 validateStage2D (ScheduleAffineStage2D affine) =
@@ -289,17 +341,118 @@ validateStage2D (ScheduleTileStage2D tileRows tileCols)
 validateStage2D ScheduleWavefrontStage2D =
   pure ()
 
-validateDependence2D :: Dependence2D -> [ScheduleStage2D] -> Either PolyhedralError ()
-validateDependence2D IndependentDependence2D _ =
-  pure ()
-validateDependence2D WavefrontDependence2D [ScheduleWavefrontStage2D] =
-  pure ()
-validateDependence2D WavefrontDependence2D _ =
-  Left (IllegalDependence2D "wavefront dependences require the wavefront schedule in the MVP polyhedral subset")
-validateDependence2D (OpaqueDependence2D _) [] =
-  pure ()
-validateDependence2D (OpaqueDependence2D message) _ =
-  Left (IllegalDependence2D ("opaque dependences are only accepted with the identity schedule: " ++ message))
+ensureLegalPhase2D :: PhaseAnalysis2D -> Either PolyhedralError ()
+ensureLegalPhase2D phaseAnalysis =
+  case phaseAnalysisLegality phaseAnalysis of
+    LegalTransform2D ->
+      pure ()
+    RequiresPrivatization2D arrays ->
+      Left
+        ( IllegalDependence2D
+            ( phaseNameText
+                ++ " requires privatization of "
+                ++ intercalate ", " arrays
+            )
+        )
+    RequiresReductionRecognition2D reducers ->
+      Left
+        ( IllegalDependence2D
+            ( phaseNameText
+                ++ " requires reduction recognition for "
+                ++ intercalate ", " reducers
+            )
+        )
+    InsufficientMetadata2D message ->
+      Left (IllegalDependence2D (phaseNameText ++ " has insufficient metadata: " ++ message))
+    IllegalTransform2D message ->
+      Left (IllegalDependence2D (phaseNameText ++ " is illegal: " ++ message))
+  where
+    phaseNameText = "phase " ++ phaseSummaryName (phaseAnalysisSummary phaseAnalysis)
+
+analyzeLegality2D :: PhaseSummary2D -> Dependence2D -> [ScheduleStage2D] -> TransformLegality2D
+analyzeLegality2D summary dependence stages =
+  case dependence of
+    IndependentDependence2D ->
+      analyzeIndependentLegality2D summary scheduleInfo
+    WavefrontDependence2D
+      | scheduleHasWavefront2D scheduleInfo && scheduleStageCount2D scheduleInfo == 1 ->
+          LegalTransform2D
+      | otherwise ->
+          IllegalTransform2D "wavefront dependences require the exact wavefront schedule in the MVP subset"
+    PrivatizableDependence2D arrays
+      | scheduleIsIdentity2D scheduleInfo ->
+          LegalTransform2D
+      | otherwise ->
+          RequiresPrivatization2D arrays
+    ReductionDependence2D reducers
+      | scheduleIsIdentity2D scheduleInfo ->
+          LegalTransform2D
+      | otherwise ->
+          RequiresReductionRecognition2D reducers
+    OpaqueDependence2D message
+      | scheduleIsIdentity2D scheduleInfo ->
+          LegalTransform2D
+      | otherwise ->
+          InsufficientMetadata2D message
+  where
+    scheduleInfo = summarizeSchedule2D stages
+
+analyzeIndependentLegality2D :: PhaseSummary2D -> ScheduleInfo2D -> TransformLegality2D
+analyzeIndependentLegality2D summary scheduleInfo
+  | scheduleHasWavefront2D scheduleInfo =
+      InsufficientMetadata2D "independent metadata does not justify a wavefront schedule"
+  | not (scheduleTransformsOrder2D scheduleInfo) =
+      LegalTransform2D
+  | null hazards =
+      LegalTransform2D
+  | otherwise =
+      InsufficientMetadata2D
+        ( "transformed schedule touches "
+            ++ intercalate ", " hazards
+            ++ " at non-identical read/write locations"
+        )
+  where
+    hazards = ambiguousHazardArrays2D summary
+
+data ScheduleInfo2D = ScheduleInfo2D
+  { scheduleIsIdentity2D :: !Bool
+  , scheduleHasWavefront2D :: !Bool
+  , scheduleTransformsOrder2D :: !Bool
+  , scheduleStageCount2D :: !Int
+  }
+
+summarizeSchedule2D :: [ScheduleStage2D] -> ScheduleInfo2D
+summarizeSchedule2D stages =
+  ScheduleInfo2D
+    { scheduleIsIdentity2D = null stages
+    , scheduleHasWavefront2D = any isWavefront stages
+    , scheduleTransformsOrder2D = not (null stages)
+    , scheduleStageCount2D = length stages
+    }
+  where
+    isWavefront ScheduleWavefrontStage2D = True
+    isWavefront _ = False
+
+ambiguousHazardArrays2D :: PhaseSummary2D -> [String]
+ambiguousHazardArrays2D summary =
+  deduplicateStrings
+    [ accessArray writeAccess
+    | writeAccess <- phaseSummaryWrites summary
+    , otherAccess <- phaseSummaryReads summary ++ phaseSummaryWrites summary
+    , accessArray writeAccess == accessArray otherAccess
+    , accessIndex writeAccess /= accessIndex otherAccess
+    ]
+
+deduplicateStrings :: [String] -> [String]
+deduplicateStrings =
+  foldr
+    (\x acc -> case acc of
+        y : _
+          | x == y -> acc
+        _ -> x : acc
+    )
+    []
+    . sortOn id
 
 lowerPhase2D :: Sh2 -> PhaseSummary2D -> (Int -> Int -> Prog ()) -> Prog ()
 lowerPhase2D shape phaseSummary body =

@@ -1,6 +1,8 @@
 module Loom.Verify.Polyhedral
   ( VerifiedSchedule2D (..)
+  , VerifiedDependence2D (..)
   , verifiedSchedule2D
+  , verifiedDependence2D
   , phase2DForVerifiedSchedule
   , rowMajorExpr2D
   , rowMajorRead2D
@@ -18,12 +20,29 @@ data VerifiedSchedule2D
   | WavefrontSchedule2D
   deriving (Eq, Show)
 
+data VerifiedDependence2D
+  = VerifiedIndependentDependence2D
+  | VerifiedWavefrontDependence2D
+  | VerifiedPrivatizableDependence2D ![String]
+  | VerifiedReductionDependence2D ![String]
+  | VerifiedOpaqueDependence2D !String
+  deriving (Eq, Show)
+
 verifiedSchedule2D :: VerifiedSchedule2D -> Poly.Schedule2D
 verifiedSchedule2D schedule =
   case schedule of
     RectSchedule2D -> Poly.identitySchedule2D
     TileSchedule2D tileRows tileCols -> Poly.tileSchedule2D tileRows tileCols
     WavefrontSchedule2D -> Poly.wavefrontSchedule2D
+
+verifiedDependence2D :: VerifiedDependence2D -> Poly.Dependence2D
+verifiedDependence2D dependence =
+  case dependence of
+    VerifiedIndependentDependence2D -> Poly.IndependentDependence2D
+    VerifiedWavefrontDependence2D -> Poly.WavefrontDependence2D
+    VerifiedPrivatizableDependence2D arrays -> Poly.PrivatizableDependence2D arrays
+    VerifiedReductionDependence2D reducers -> Poly.ReductionDependence2D reducers
+    VerifiedOpaqueDependence2D message -> Poly.OpaqueDependence2D message
 
 phase2DForVerifiedSchedule ::
   String ->

@@ -94,6 +94,9 @@ main = do
   testPolyhedralScheduleRendering
   testPolyhedralSummary
   testPolyhedralLegality
+  testPolyhedralAnalysisPrivatization
+  testPolyhedralAnalysisReduction
+  testPolyhedralAnalysisInsufficientMetadata
   testPolyhedralWavefrontLegality
   testPolyhedralLoweringPhases
   testPolyhedralInvalidLowering
@@ -993,10 +996,102 @@ testPolyhedralLegality = do
     Left err ->
       assertEqual
         "polyhedral opaque dependence rejected"
-        (Poly.IllegalDependence2D "opaque dependences are only accepted with the identity schedule: stencil-carried dependence")
+        (Poly.IllegalDependence2D "phase opaque has insufficient metadata: stencil-carried dependence")
         err
     Right _ ->
       error "opaque polyhedral dependence should fail"
+
+testPolyhedralAnalysisPrivatization :: IO ()
+testPolyhedralAnalysisPrivatization = do
+  let kernel =
+        Poly.kernel2D
+          (sh2 4 4)
+          [ Poly.phase2D
+              "privatize"
+              (Poly.tileSchedule2D 2 2)
+              (Poly.PrivatizableDependence2D ["scratch"])
+              []
+              []
+              (\_ _ -> pure ())
+          ]
+  case Poly.analyzeKernel2D kernel of
+    Left err ->
+      error ("unexpected polyhedral analysis failure: " ++ show err)
+    Right analysis ->
+      case Poly.kernelAnalysisPhases analysis of
+        [phaseAnalysis] ->
+          assertEqual
+            "polyhedral privatization analysis"
+            (Poly.RequiresPrivatization2D ["scratch"])
+            (Poly.phaseAnalysisLegality phaseAnalysis)
+        _ -> error "expected one analyzed polyhedral phase"
+  case Poly.validateKernel2D kernel of
+    Left err ->
+      assertEqual
+        "polyhedral privatization validation"
+        (Poly.IllegalDependence2D "phase privatize requires privatization of scratch")
+        err
+    Right _ ->
+      error "privatization-requiring polyhedral schedule should not validate"
+
+testPolyhedralAnalysisReduction :: IO ()
+testPolyhedralAnalysisReduction = do
+  let kernel =
+        Poly.kernel2D
+          (sh2 4 4)
+          [ Poly.phase2D
+              "reduce"
+              (Poly.affineSchedule2D interchange2D)
+              (Poly.ReductionDependence2D ["sum"])
+              []
+              []
+              (\_ _ -> pure ())
+          ]
+  case Poly.analyzeKernel2D kernel of
+    Left err ->
+      error ("unexpected polyhedral analysis failure: " ++ show err)
+    Right analysis ->
+      case Poly.kernelAnalysisPhases analysis of
+        [phaseAnalysis] ->
+          assertEqual
+            "polyhedral reduction analysis"
+            (Poly.RequiresReductionRecognition2D ["sum"])
+            (Poly.phaseAnalysisLegality phaseAnalysis)
+        _ -> error "expected one analyzed polyhedral phase"
+
+testPolyhedralAnalysisInsufficientMetadata :: IO ()
+testPolyhedralAnalysisInsufficientMetadata = do
+  let rowShifted = Poly.plus Poly.rowVar (Poly.constant (-1))
+      kernel =
+        Poly.kernel2D
+          (sh2 4 4)
+          [ Poly.phase2D
+              "stencilish"
+              (Poly.tileSchedule2D 2 2)
+              Poly.IndependentDependence2D
+              [Poly.readAccess2D "arr" (Poly.plus (Poly.scaled 4 rowShifted) Poly.colVar)]
+              [Poly.writeAccess2D "arr" (Poly.plus (Poly.scaled 4 Poly.rowVar) Poly.colVar)]
+              (\_ _ -> pure ())
+          ]
+  case Poly.analyzeKernel2D kernel of
+    Left err ->
+      error ("unexpected polyhedral analysis failure: " ++ show err)
+    Right analysis ->
+      case Poly.kernelAnalysisPhases analysis of
+        [phaseAnalysis] ->
+          assertEqual
+            "polyhedral insufficient metadata analysis"
+            (Poly.InsufficientMetadata2D "transformed schedule touches arr at non-identical read/write locations")
+            (Poly.phaseAnalysisLegality phaseAnalysis)
+        _ -> error "expected one analyzed polyhedral phase"
+  case Poly.lowerKernel2D kernel of
+    Left err ->
+      assertEqual
+        "polyhedral insufficient metadata lowering"
+        (Poly.IllegalDependence2D "phase stencilish has insufficient metadata: transformed schedule touches arr at non-identical read/write locations")
+        err
+    Right _ ->
+      error "insufficient-metadata polyhedral lowering should fail"
 
 testPolyhedralWavefrontLegality :: IO ()
 testPolyhedralWavefrontLegality = do
@@ -1026,7 +1121,7 @@ testPolyhedralWavefrontLegality = do
     Left err ->
       assertEqual
         "polyhedral wavefront schedule rejected"
-        (Poly.IllegalDependence2D "wavefront dependences require the wavefront schedule in the MVP polyhedral subset")
+        (Poly.IllegalDependence2D "phase wavefront+tiled is illegal: wavefront dependences require the exact wavefront schedule in the MVP subset")
         err
     Right _ ->
       error "invalid wavefront polyhedral schedule should fail"
@@ -1125,6 +1220,10 @@ testVerifiedPolyhedralBridge = do
     "verified polyhedral wave prevdiag"
     "read dp[5*row + col]"
     (Poly.renderAccess2D (VerifyPoly.waveRowMajorRead2D "dp" 5 (1, 1) Verify.WavePrevDiag))
+  assertEqual
+    "verified polyhedral reduction dependence"
+    (Poly.ReductionDependence2D ["sum"])
+    (VerifyPoly.verifiedDependence2D (VerifyPoly.VerifiedReductionDependence2D ["sum"]))
 
 testWavefrontFillCoverage :: IO ()
 testWavefrontFillCoverage = do

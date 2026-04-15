@@ -7,6 +7,9 @@ module Loom.Polyhedral
   , Schedule2D
   , PhaseSummary2D (..)
   , KernelSummary2D (..)
+  , TransformLegality2D (..)
+  , PhaseAnalysis2D (..)
+  , KernelAnalysis2D (..)
   , PolyhedralError (..)
   , Phase2D
   , Kernel2D
@@ -29,6 +32,7 @@ module Loom.Polyhedral
   , phase2D
   , kernel2D
   , summarizeKernel2D
+  , analyzeKernel2D
   , validateKernel2D
   , lowerKernel2D
   ) where
