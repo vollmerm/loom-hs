@@ -6,6 +6,8 @@ module Loom.Benchmark.Kernels
   , benchmarks
   , lookupBenchmark
   , runFill3DExample
+  , runJacobi1DExample
+  , runVerifiedJacobi1DExample
   , runNBodyExample
   , runInt32TiledMatMulScalarExample
   , runInt32TiledMatMulVectorizedExample
@@ -62,6 +64,12 @@ data DoubleUnaryEnv = DoubleUnaryEnv
   , doubleInput :: !(Arr Double)
   }
 
+data JacobiEnv = JacobiEnv
+  { jacobiLength :: !Int
+  , jacobiSteps :: !Int
+  , jacobiInput :: !(Arr Double)
+  }
+
 data NBodyEnv = NBodyEnv
   { nbodyCount :: !Int
   , nbodyPosX :: !(Arr Double)
@@ -102,6 +110,8 @@ benchmarks =
   , Benchmark "map" "parallel 1D elementwise map over two inputs" 1000000 setupBinaryVector runMap
   , Benchmark "sum" "parallel reduction over one vector" 1000000 setupUnaryVector runSum
   , Benchmark "dot" "parallel dot product over two vectors" 1000000 setupBinaryVector runDot
+  , Benchmark "jacobi-1d" "vectorized 1D Jacobi / heat-diffusion timesteps with double buffering" 262144 setupJacobi1D runJacobi1D
+  , Benchmark "verified-jacobi-1d" "vectorized 1D Jacobi via Loom.Verify with checked shifted accesses" 262144 setupJacobi1D runVerifiedJacobi1D
   , Benchmark "nbody" "parallel softened all-pairs n-body force accumulation with SoA layout and source tiling" 2048 setupNBody runNBody
   , Benchmark "matmul" "parallel square matrix multiply" 256 setupMatrix runMatMul
   , Benchmark "tiled-matmul" "parallel square matrix multiply with tiled traversal" 256 setupMatrix runTiledMatMul
@@ -153,6 +163,11 @@ setupDoubleVector :: Int -> IO DoubleUnaryEnv
 setupDoubleVector n = do
   xs <- seededDoubleVector n 17 11
   pure (DoubleUnaryEnv n xs)
+
+setupJacobi1D :: Int -> IO JacobiEnv
+setupJacobi1D n = do
+  xs <- seededDoubleVector n 17 11
+  pure (JacobiEnv n jacobiBenchmarkSteps xs)
 
 setupNBody :: Int -> IO NBodyEnv
 setupNBody n = do
@@ -274,6 +289,16 @@ runDot env =
           reduce sumVar (x * y)
         getReducer sumVar
 
+runJacobi1D :: JacobiEnv -> IO Int
+runJacobi1D env = do
+  out <- runJacobi1DKernel (jacobiSteps env) (jacobiLength env) (jacobiInput env)
+  sampleDoubleVector out (jacobiLength env)
+
+runVerifiedJacobi1D :: JacobiEnv -> IO Int
+runVerifiedJacobi1D env = do
+  out <- runVerifiedJacobi1DKernel (jacobiSteps env) (jacobiLength env) (jacobiInput env)
+  sampleDoubleVector out (jacobiLength env)
+
 runNBody :: NBodyEnv -> IO Int
 runNBody env = do
   let n = nbodyCount env
@@ -386,6 +411,18 @@ runDoubleTiledMatMulVectorizedExample n xs ys = do
   right <- fromList ys
   out <- newArr (n * n)
   runDoubleTiledMatMulVectorizedKernel n left right out
+  toList out
+
+runJacobi1DExample :: Int -> [Double] -> IO [Double]
+runJacobi1DExample steps xs = do
+  src <- fromList xs
+  out <- runJacobi1DKernel steps (length xs) src
+  toList out
+
+runVerifiedJacobi1DExample :: Int -> [Double] -> IO [Double]
+runVerifiedJacobi1DExample steps xs = do
+  src <- fromList xs
+  out <- runVerifiedJacobi1DKernel steps (length xs) src
   toList out
 
 runNBodyExample :: [Double] -> [Double] -> [Double] -> [Double] -> IO [Double]
@@ -609,6 +646,114 @@ runDoubleTiledMatMulVectorizedKernel n left right out =
             (\j -> writeMatMulScalarCellDouble n left right out i (col0 + j))
   where
     tile = max 1 (min 32 n)
+
+runJacobi1DKernel :: Int -> Int -> Arr Double -> IO (Arr Double)
+runJacobi1DKernel steps n src = do
+  current <- newArr n
+  scratch <- newArr n
+  copyDoubleArrayKernel n src current
+  go steps current scratch
+  where
+    go !remaining current next
+      | remaining <= 0 = pure current
+      | otherwise = do
+          runJacobi1DStepKernel n current next
+          go (remaining - 1) next current
+
+runVerifiedJacobi1DKernel :: Int -> Int -> Arr Double -> IO (Arr Double)
+runVerifiedJacobi1DKernel steps n src = do
+  let shape = Verify.shape1 n
+      srcArray = Verify.wrapArray shape src
+      copyCurrent srcArr dstArr =
+        Verify.runProg $
+          Verify.parallel $
+            Verify.parFor1D shape $ \ctx ix -> do
+              x <- Verify.readAt ctx srcArr ix
+              Verify.writeAt ctx dstArr ix x
+      stepKernel prev next =
+        Verify.runProg $
+          Verify.parallel $ do
+            let readCtx = Verify.rectReadAccess1D shape
+                writeCtx = Verify.rectWriteAccess1D shape
+                writeVecChunk ix = do
+                  left <- Verify.readDVecOffsetAt1D readCtx prev (-1) ix
+                  center <- Verify.readDVecAt1D readCtx prev ix
+                  right <- Verify.readDVecOffsetAt1D readCtx prev 1 ix
+                  let total = addDVec (addDVec left right) (addDVec center center)
+                  Verify.writeDVecAt1D writeCtx next ix (mulDVec total jacobiWeightVec)
+                writeScalarCell ix = do
+                  left <- Verify.readOffsetAt1D readCtx prev (-1) ix
+                  center <- Verify.readAt readCtx prev ix
+                  right <- Verify.readOffsetAt1D readCtx prev 1 ix
+                  Verify.writeAt writeCtx next ix ((left + center + center + right) * 0.25)
+            first <- Verify.readAt readCtx prev (Verify.rectIx1 0)
+            Verify.writeAt writeCtx next (Verify.rectIx1 0) first
+            if n > 1
+              then do
+                lastValue <- Verify.readAt readCtx prev (Verify.rectIx1 (n - 1))
+                Verify.writeAt writeCtx next (Verify.rectIx1 (n - 1)) lastValue
+              else pure ()
+            let interiorCount = max 0 (n - 2)
+            stripMine vecWidth interiorCount
+              (\offset -> writeVecChunk (Verify.rectIx1 (offset + 1)))
+              (\offset -> writeScalarCell (Verify.rectIx1 (offset + 1)))
+      go !remaining current next
+        | remaining <= 0 = pure (Verify.unwrapArray current)
+        | otherwise = do
+            stepKernel current next
+            go (remaining - 1) next current
+  current <- Verify.newArray shape
+  scratch <- Verify.newArray shape
+  copyCurrent srcArray current
+  go steps current scratch
+
+runJacobi1DStepKernel :: Int -> Arr Double -> Arr Double -> IO ()
+runJacobi1DStepKernel n prev next =
+  runProg $
+    parallel $ do
+      first <- readArr prev 0
+      writeArr next 0 first
+      if n > 1
+        then do
+          lastValue <- readArr prev (n - 1)
+          writeArr next (n - 1) lastValue
+        else pure ()
+      let interiorCount = max 0 (n - 2)
+      stripMine vecWidth interiorCount
+        (\offset -> writeJacobi1DVecChunk prev next (offset + 1))
+        (\offset -> writeJacobi1DScalarCell prev next (offset + 1))
+
+copyDoubleArrayKernel :: Int -> Arr Double -> Arr Double -> IO ()
+copyDoubleArrayKernel n src dst =
+  runProg $
+    parallel $
+      parFor n $ \i -> do
+        x <- readArr src i
+        writeArr dst i x
+
+{-# INLINE writeJacobi1DVecChunk #-}
+writeJacobi1DVecChunk :: Arr Double -> Arr Double -> Int -> Prog ()
+writeJacobi1DVecChunk prev next i = do
+  left <- readDVec prev (i - 1)
+  center <- readDVec prev i
+  right <- readDVec prev (i + 1)
+  let total = addDVec (addDVec left right) (addDVec center center)
+  writeDVec next i (mulDVec total jacobiWeightVec)
+
+{-# INLINE writeJacobi1DScalarCell #-}
+writeJacobi1DScalarCell :: Arr Double -> Arr Double -> Int -> Prog ()
+writeJacobi1DScalarCell prev next i = do
+  left <- readArr prev (i - 1)
+  center <- readArr prev i
+  right <- readArr prev (i + 1)
+  writeArr next i ((left + center + center + right) * 0.25)
+
+jacobiBenchmarkSteps :: Int
+jacobiBenchmarkSteps = 50
+
+{-# INLINE jacobiWeightVec #-}
+jacobiWeightVec :: DVec
+jacobiWeightVec = broadcastDVec 0.25
 
 runNBodyKernel ::
   Int ->
