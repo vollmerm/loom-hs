@@ -13,6 +13,7 @@ module Loom.Internal.Verify
   , Array
   , Index
   , AccessCtx
+  , DVec
   , Prog
   , Reducer
   , ReduceVar
@@ -47,7 +48,11 @@ module Loom.Internal.Verify
   , reduce
   , getReducer
   , readAt
+  , readOffsetAt1D
+  , readDVecAt1D
+  , readDVecOffsetAt1D
   , writeAt
+  , writeDVecAt1D
   , readWaveAt
   , writeWaveAt
   , rowOf
@@ -69,6 +74,7 @@ module Loom.Internal.Verify
 import Data.Primitive.Types (Prim)
 import Loom.Internal.Kernel
   ( Arr
+  , DVec
   , Ix1
   , Ix2
   , Ix3
@@ -95,6 +101,7 @@ import Loom.Internal.Kernel
   , parForSh3
   , parallel
   , readArr
+  , readDVec
   , runProg
   , sh1
   , sh2
@@ -105,7 +112,9 @@ import Loom.Internal.Kernel
   , unIx1
   , unIx2
   , unIx3
+  , vecWidth
   , writeArr
+  , writeDVec
   )
 import qualified Loom.Internal.Kernel as K
 
@@ -385,6 +394,45 @@ readAt ctx arr ix =
       checkAccessShape "readAt" ctx3 arrShape `seq`
         readArr rawArr (index3 (rawShape3 arrShape) (globalIndex3 rawIx3))
 
+readOffsetAt1D ::
+  (Prim a, CanRead cap) =>
+  AccessCtx cap 'Rect 'Rank1 ->
+  Array 'Rank1 a ->
+  Int ->
+  Index 'Rect 'Rank1 ->
+  Prog a
+{-# INLINE readOffsetAt1D #-}
+readOffsetAt1D ctx arr offset ix =
+  case (ctx, arr, ix) of
+    (ctx1@(Access1 shape), Array arrShape rawArr, Index1 rawIx) ->
+      checkAccessShape "readOffsetAt1D" ctx1 arrShape `seq`
+        checkShiftedWindow1D "readOffsetAt1D" shape rawIx offset 1 `seq`
+          readArr rawArr (unIx1 rawIx + offset)
+
+readDVecAt1D ::
+  CanRead cap =>
+  AccessCtx cap 'Rect 'Rank1 ->
+  Array 'Rank1 Double ->
+  Index 'Rect 'Rank1 ->
+  Prog DVec
+{-# INLINE readDVecAt1D #-}
+readDVecAt1D ctx arr = readDVecOffsetAt1D ctx arr 0
+
+readDVecOffsetAt1D ::
+  CanRead cap =>
+  AccessCtx cap 'Rect 'Rank1 ->
+  Array 'Rank1 Double ->
+  Int ->
+  Index 'Rect 'Rank1 ->
+  Prog DVec
+{-# INLINE readDVecOffsetAt1D #-}
+readDVecOffsetAt1D ctx arr offset ix =
+  case (ctx, arr, ix) of
+    (ctx1@(Access1 shape), Array arrShape rawArr, Index1 rawIx) ->
+      checkAccessShape "readDVecOffsetAt1D" ctx1 arrShape `seq`
+        checkShiftedWindow1D "readDVecOffsetAt1D" shape rawIx offset vecWidth `seq`
+          readDVec rawArr (unIx1 rawIx + offset)
+
 writeAt ::
   (Prim a, CanWrite cap) =>
   AccessCtx cap sched rank ->
@@ -413,6 +461,21 @@ writeAt ctx arr ix x =
     (ctx3@(TileAccess3 _), Array arrShape@(Shape3 _ _ _ _) rawArr, rawIx3) ->
       checkAccessShape "writeAt" ctx3 arrShape `seq`
         writeArr rawArr (index3 (rawShape3 arrShape) (globalIndex3 rawIx3)) x
+
+writeDVecAt1D ::
+  CanWrite cap =>
+  AccessCtx cap 'Rect 'Rank1 ->
+  Array 'Rank1 Double ->
+  Index 'Rect 'Rank1 ->
+  DVec ->
+  Prog ()
+{-# INLINE writeDVecAt1D #-}
+writeDVecAt1D ctx arr ix vec =
+  case (ctx, arr, ix) of
+    (ctx1@(Access1 shape), Array arrShape rawArr, Index1 rawIx) ->
+      checkAccessShape "writeDVecAt1D" ctx1 arrShape `seq`
+        checkShiftedWindow1D "writeDVecAt1D" shape rawIx 0 vecWidth `seq`
+          writeDVec rawArr (unIx1 rawIx) vec
 
 readWaveAt ::
   (Prim a, CanRead cap) =>
@@ -548,6 +611,35 @@ checkAccessShape label ctx =
     WaveAccess2 shape -> checkMatchingShape label shape
     Access3 shape -> checkMatchingShape label shape
     TileAccess3 shape -> checkMatchingShape label shape
+
+checkShiftedWindow1D :: String -> Shape 'Rank1 -> Ix1 -> Int -> Int -> ()
+{-# INLINE checkShiftedWindow1D #-}
+checkShiftedWindow1D label (Shape1 n _) rawIx offset width
+  | base < 0 =
+      error
+        ( "Loom.Verify."
+            ++ label
+            ++ ": shifted access starts before the array: base="
+            ++ show base
+            ++ ", width="
+            ++ show width
+            ++ ", extent="
+            ++ show n
+        )
+  | base + width > n =
+      error
+        ( "Loom.Verify."
+            ++ label
+            ++ ": shifted access exceeds the array: base="
+            ++ show base
+            ++ ", width="
+            ++ show width
+            ++ ", extent="
+            ++ show n
+        )
+  | otherwise = ()
+  where
+    base = unIx1 rawIx + offset
 
 checkWaveAccessShape :: String -> Shape 'Rank2 -> Shape 'Rank2 -> (Int, Int) -> WaveOffset -> ()
 {-# INLINE checkWaveAccessShape #-}

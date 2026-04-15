@@ -14,11 +14,16 @@ module Loom.Internal.Kernel
   , Ix1
   , Ix2
   , Ix3
+  , IxN
   , Sh1
   , Sh2
   , Sh3
+  , ShN
   , Rect2
+  , RectN
+  , AffineN
   , Affine2
+  , ScheduleN
   , Transform2D
   , Vec
   , IVec
@@ -31,10 +36,14 @@ module Loom.Internal.Kernel
   , ix1
   , ix2
   , ix3
+  , ixN
   , sh1
   , sh2
   , sh3
+  , shN
   , rect2
+  , rectN
+  , affineN
   , affine2
   , newArr
   , fromList
@@ -42,12 +51,23 @@ module Loom.Internal.Kernel
   , unIx1
   , unIx2
   , unIx3
+  , unIxN
+  , unSh2
+  , unShN
   , unRect2
+  , unRectN
   , withIx2
   , withIx3
   , index1
   , index2
   , index3
+  , indexN
+  , applyAffineN
+  , composeAffineN
+  , invertAffineN
+  , identityAffineN
+  , permuteAffineN
+  , boundingBoxAffineN
   , applyAffine2
   , composeAffine2
   , invertAffine2
@@ -55,6 +75,12 @@ module Loom.Internal.Kernel
   , interchange2D
   , skew2D
   , boundingBoxAffine2D
+  , identityScheduleN
+  , affineScheduleN
+  , tileScheduleN
+  , permuteScheduleN
+  , composeScheduleN
+  , renderScheduleN
   , identityTransform2D
   , affineTransform2D
   , tileTransform2D
@@ -72,19 +98,25 @@ module Loom.Internal.Kernel
   , parForSh1
   , parForSh2
   , parForSh3
+  , parForShN
   , parFor2
   , parFor3
   , parForRect2D
+  , parForRectN
+  , parForScheduleN
   , parForAffineRect2D
   , parForAffine2D
   , parForWavefront2D
   , tileRect2D
+  , tileN
   , tiledForRect2D
   , parForTransform2D
   , tile2D
   , tile3D
+  , parForTileN
   , parForTile2D
   , parForTile3D
+  , tiledForN
   , tiledFor2D
   , tiledFor3D
   , stripMine
@@ -157,6 +189,7 @@ import Data.Primitive.PrimVar
   , writePrimVar
   )
 import Data.Primitive.Types (Prim)
+import Data.Ratio ((%), denominator, numerator)
 import GHC.Conc (getNumCapabilities)
 import GHC.Exts hiding
   ( fromList
@@ -172,11 +205,15 @@ data Ix2 = Ix2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
 data Ix3 = Ix3 {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
+newtype IxN = IxN [Int]
+
 newtype Sh1 = Sh1 Int
 
 data Sh2 = Sh2 {-# UNPACK #-} !Int {-# UNPACK #-} !Int
 
 data Sh3 = Sh3 {-# UNPACK #-} !Int {-# UNPACK #-} !Int {-# UNPACK #-} !Int
+
+newtype ShN = ShN [Int]
 
 data Rect2 =
   Rect2
@@ -184,6 +221,10 @@ data Rect2 =
     {-# UNPACK #-} !Int
     {-# UNPACK #-} !Int
     {-# UNPACK #-} !Int
+
+data RectN = RectN ![Int] ![Int]
+
+data AffineN = AffineN ![[Int]] ![Int]
 
 data Affine2 =
   Affine2
@@ -197,6 +238,12 @@ data Affine2 =
 data Domain2D
   = RectDomain !Rect2
   | SkewDomain !Rect2 !Int
+
+data ScheduleStageN
+  = ScheduleAffineStageN !AffineN
+  | ScheduleTileStageN ![Int]
+
+newtype ScheduleN = ScheduleN [ScheduleStageN]
 
 newtype Transform2D = Transform2D TransformExpr2D
 
@@ -679,6 +726,10 @@ ix2 = Ix2
 ix3 :: Int -> Int -> Int -> Ix3
 ix3 = Ix3
 
+{-# INLINE ixN #-}
+ixN :: [Int] -> IxN
+ixN = IxN
+
 {-# INLINE sh1 #-}
 sh1 :: Int -> Sh1
 sh1 = Sh1
@@ -691,9 +742,21 @@ sh2 = Sh2
 sh3 :: Int -> Int -> Int -> Sh3
 sh3 = Sh3
 
+{-# INLINE shN #-}
+shN :: [Int] -> ShN
+shN = ShN
+
 {-# INLINE rect2 #-}
 rect2 :: Int -> Int -> Int -> Int -> Rect2
 rect2 = Rect2
+
+{-# INLINE rectN #-}
+rectN :: [Int] -> [Int] -> RectN
+rectN = RectN
+
+{-# INLINE affineN #-}
+affineN :: [[Int]] -> [Int] -> AffineN
+affineN = AffineN
 
 {-# INLINE affine2 #-}
 affine2 :: Int -> Int -> Int -> Int -> Int -> Int -> Affine2
@@ -711,9 +774,25 @@ unIx2 (Ix2 i j) = (i, j)
 unIx3 :: Ix3 -> (Int, Int, Int)
 unIx3 (Ix3 i j k) = (i, j, k)
 
+{-# INLINE unIxN #-}
+unIxN :: IxN -> [Int]
+unIxN (IxN is) = is
+
+{-# INLINE unSh2 #-}
+unSh2 :: Sh2 -> (Int, Int)
+unSh2 (Sh2 i j) = (i, j)
+
+{-# INLINE unShN #-}
+unShN :: ShN -> [Int]
+unShN (ShN dims) = dims
+
 {-# INLINE unRect2 #-}
 unRect2 :: Rect2 -> (Int, Int, Int, Int)
 unRect2 (Rect2 rowLo colLo rowHi colHi) = (rowLo, colLo, rowHi, colHi)
+
+{-# INLINE unRectN #-}
+unRectN :: RectN -> ([Int], [Int])
+unRectN (RectN lo hi) = (lo, hi)
 
 {-# INLINE withIx2 #-}
 withIx2 :: Ix2 -> (Int -> Int -> r) -> r
@@ -734,6 +813,94 @@ index2 (Sh2 _ n) (Ix2 i j) = i * n + j
 {-# INLINE index3 #-}
 index3 :: Sh3 -> Ix3 -> Int
 index3 (Sh3 _ m n) (Ix3 i j k) = ((i * m) + j) * n + k
+
+{-# INLINE indexN #-}
+indexN :: ShN -> IxN -> Int
+indexN (ShN dims) (IxN is)
+  | length dims /= length is =
+      error "indexN requires shape and index ranks to match"
+  | otherwise =
+      go dims is 0
+  where
+    go [] [] !acc = acc
+    go (_ : _) [] !_ = error "indexN: impossible shape/index mismatch"
+    go [] (_ : _) !_ = error "indexN: impossible shape/index mismatch"
+    go (dim : restDims) (i : restIx) !acc =
+      go restDims restIx (acc * dim + i)
+
+{-# INLINE applyAffineN #-}
+applyAffineN :: AffineN -> IxN -> IxN
+applyAffineN (AffineN rows offset) (IxN is)
+  | length rows /= length offset =
+      error "applyAffineN requires matching matrix and offset ranks"
+  | any ((/= length is) . length) rows =
+      error "applyAffineN requires an affine matrix whose row widths match the input rank"
+  | otherwise =
+      IxN (zipWith (\row bias -> dotProduct row is + bias) rows offset)
+
+{-# INLINE composeAffineN #-}
+composeAffineN :: AffineN -> AffineN -> AffineN
+composeAffineN (AffineN outerRows outerOffset) (AffineN innerRows innerOffset)
+  | length outerRows /= length outerOffset =
+      error "composeAffineN requires a well-formed outer affine transform"
+  | length innerRows /= length innerOffset =
+      error "composeAffineN requires a well-formed inner affine transform"
+  | any ((/= innerRank) . length) outerRows =
+      error "composeAffineN requires the outer affine input rank to match the inner affine output rank"
+  | any ((/= inputRank) . length) innerRows =
+      error "composeAffineN requires the inner affine matrix to have consistent row widths"
+  | otherwise =
+      AffineN
+        [ [sum (zipWith (*) outerRow column) | column <- columnsOf innerRows]
+        | outerRow <- outerRows
+        ]
+        (zipWith (\outerRow bias -> dotProduct outerRow innerOffset + bias) outerRows outerOffset)
+  where
+    innerRank = length innerRows
+    inputRank =
+      case innerRows of
+        [] -> 0
+        row0 : _ -> length row0
+
+{-# INLINE invertAffineN #-}
+invertAffineN :: AffineN -> Maybe AffineN
+invertAffineN (AffineN rows offset) = do
+  invRows <- invertIntegerMatrix rows
+  let !bias = map negate (multiplyMatrixVector invRows offset)
+  pure (AffineN invRows bias)
+
+{-# INLINE identityAffineN #-}
+identityAffineN :: Int -> AffineN
+identityAffineN rank =
+  AffineN
+    [ [if i == j then 1 else 0 | j <- [0 .. rank - 1]]
+    | i <- [0 .. rank - 1]
+    ]
+    (replicate rank 0)
+
+{-# INLINE permuteAffineN #-}
+permuteAffineN :: [Int] -> AffineN
+permuteAffineN order
+  | not (isPermutation order) =
+      error "permuteAffineN requires a valid permutation"
+  | otherwise =
+      AffineN
+        [ [if source == axis then 1 else 0 | axis <- [0 .. rank - 1]]
+        | source <- order
+        ]
+        (replicate rank 0)
+  where
+    rank = length order
+
+{-# INLINE boundingBoxAffineN #-}
+boundingBoxAffineN :: AffineN -> RectN -> RectN
+boundingBoxAffineN affine rect@(RectN lo _)
+  | isEmptyRectN rect = RectN lo lo
+  | otherwise =
+      let points = map (unIxN . applyAffineN affine . IxN) (rectCornersN rect)
+          mins = foldl1 (zipWith min) points
+          maxs = foldl1 (zipWith max) points
+       in RectN mins (zipWith (+) maxs (repeat 1))
 
 {-# INLINE applyAffine2 #-}
 applyAffine2 :: Affine2 -> Ix2 -> Ix2
@@ -782,6 +949,39 @@ invertAffine2 (Affine2 a00 a01 a10 a11 b0 b1) =
 {-# INLINE identityAffine2 #-}
 identityAffine2 :: Affine2
 identityAffine2 = Affine2 1 0 0 1 0 0
+
+{-# INLINE identityScheduleN #-}
+identityScheduleN :: ScheduleN
+identityScheduleN = ScheduleN []
+
+{-# INLINE affineScheduleN #-}
+affineScheduleN :: AffineN -> ScheduleN
+affineScheduleN affine = ScheduleN [ScheduleAffineStageN affine]
+
+{-# INLINE tileScheduleN #-}
+tileScheduleN :: [Int] -> ScheduleN
+tileScheduleN tileDims = ScheduleN [ScheduleTileStageN tileDims]
+
+{-# INLINE permuteScheduleN #-}
+permuteScheduleN :: [Int] -> ScheduleN
+permuteScheduleN =
+  affineScheduleN . permuteAffineN
+
+{-# INLINE composeScheduleN #-}
+composeScheduleN :: ScheduleN -> ScheduleN -> ScheduleN
+composeScheduleN (ScheduleN left) (ScheduleN right) =
+  ScheduleN (normalizeScheduleStagesN (left ++ right))
+
+renderScheduleN :: ScheduleN -> String
+renderScheduleN (ScheduleN stages) =
+  case normalizeScheduleStagesN stages of
+    [] -> "identity"
+    normalized ->
+      foldl1 (\acc stageText -> acc ++ " -> " ++ stageText) (map renderStageN normalized)
+  where
+    renderStageN (ScheduleAffineStageN _) = "affine"
+    renderStageN (ScheduleTileStageN tileDims) =
+      "tile(" ++ renderIntList tileDims ++ ")"
 
 {-# INLINE identityTransform2D #-}
 identityTransform2D :: Transform2D
@@ -1539,6 +1739,24 @@ parForSh3 (Sh3 l m n) body =
             I# n# ->
               loopParForSh3# l# m# n# (\i# j# k# -> body (Ix3 (I# i#) (I# j#) (I# k#)))
 
+{-# INLINE parForShN #-}
+parForShN :: ShN -> (IxN -> Prog ()) -> Prog ()
+parForShN (ShN dims) body
+  | any (< 0) dims = invalidProgUsage "parForShN requires non-negative extents"
+  | otherwise =
+      case dims of
+        [] ->
+          body (IxN [])
+        [n] ->
+          parForSh1 (Sh1 n) (\ix -> body (IxN [unIx1 ix]))
+        [rows, cols] ->
+          parForSh2 (Sh2 rows cols) (\ix -> withIx2 ix (\i j -> body (IxN [i, j])))
+        [depth, rows, cols] ->
+          parForSh3 (Sh3 depth rows cols) (\ix -> withIx3 ix (\i j k -> body (IxN [i, j, k])))
+        _ ->
+          let !total = product dims
+           in parFor total (\linear -> body (IxN (decodeLinearIndexN dims linear)))
+
 {-# INLINE parFor2 #-}
 parFor2 :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
 parFor2 = loopParForSh2
@@ -1555,6 +1773,38 @@ parForRect2D (Rect2 rowLo colLo rowHi colHi) body =
     k ()
   where
     rect = Rect2 rowLo colLo rowHi colHi
+
+{-# INLINE parForRectN #-}
+parForRectN :: RectN -> (IxN -> Prog ()) -> Prog ()
+parForRectN (RectN lo hi) body
+  | length lo /= length hi =
+      invalidProgUsage "parForRectN requires lower and upper bounds with matching ranks"
+  | any (< 0) lo =
+      invalidProgUsage "parForRectN requires non-negative lower bounds"
+  | any (< 0) extents =
+      invalidProgUsage "parForRectN requires upper bounds greater than or equal to lower bounds"
+  | otherwise =
+      case (lo, hi, extents) of
+        ([], [], []) ->
+          body (IxN [])
+        ([lo0], _, [extent0]) ->
+          parForSh1 (Sh1 extent0) (\ix -> body (IxN [lo0 + unIx1 ix]))
+        ([rowLo, colLo], [rowHi, colHi], _) ->
+          parForRect2D (Rect2 rowLo colLo rowHi colHi) (\ix -> withIx2 ix (\i j -> body (IxN [i, j])))
+        ([depthLo, rowLo, colLo], _, [depthCount, rowCount, colCount]) ->
+          parForSh3 (Sh3 depthCount rowCount colCount) $ \ix ->
+            withIx3 ix $ \i j k ->
+              body (IxN [depthLo + i, rowLo + j, colLo + k])
+        _ ->
+          parForShN (ShN extents) $ \(IxN offset) ->
+            body (IxN (zipWith (+) lo offset))
+  where
+    extents = zipWith (-) hi lo
+
+{-# INLINE parForScheduleN #-}
+parForScheduleN :: ScheduleN -> ShN -> (IxN -> Prog ()) -> Prog ()
+parForScheduleN schedule shape body =
+  applyScheduleN (normalizeScheduleN schedule) (rectOfShapeN shape) body
 
 {-# INLINE parForAffineRect2D #-}
 parForAffineRect2D :: Affine2 -> Rect2 -> (Ix2 -> Prog ()) -> Prog ()
@@ -1589,6 +1839,19 @@ tileRect2D tileRows tileCols (Rect2 rowLo colLo rowHi colHi) body =
     k ()
   where
     rect = Rect2 rowLo colLo rowHi colHi
+
+{-# INLINE tileN #-}
+tileN :: [Int] -> ShN -> (IxN -> Prog ()) -> Prog ()
+tileN tileDims (ShN dims) body
+  | length tileDims /= length dims =
+      invalidProgUsage "tileN requires tile extents with the same rank as the shape"
+  | any (<= 0) tileDims =
+      invalidProgUsage "tileN requires positive tile extents"
+  | any (< 0) dims =
+      invalidProgUsage "tileN requires non-negative shape extents"
+  | otherwise =
+      parForShN (ShN (zipWith tileCountInt dims tileDims)) $ \(IxN tileIx) ->
+        body (IxN (zipWith (*) tileIx tileDims))
 
 {-# INLINE tiledForRect2D #-}
 tiledForRect2D :: Int -> Int -> Rect2 -> (Ix2 -> Prog ()) -> Prog ()
@@ -1787,11 +2050,36 @@ parForTile3D tileDepth tileRows tileCols depth0 row0 col0 (Sh3 depth rows cols) 
                                                                                 depthCount#
                                                                                 rowCount#
                                                                                 colCount#
-                                                                                (\i# j# k# ->
-                                                                                   body
-                                                                                     (I# (depth0# +# i#))
-                                                                                     (I# (row0# +# j#))
-                                                                                     (I# (col0# +# k#)))
+                                                                               (\i# j# k# ->
+                                                                                  body
+                                                                                    (I# (depth0# +# i#))
+                                                                                    (I# (row0# +# j#))
+                                                                                    (I# (col0# +# k#)))
+
+{-# INLINE parForTileN #-}
+parForTileN :: [Int] -> IxN -> ShN -> (IxN -> Prog ()) -> Prog ()
+parForTileN tileDims (IxN origin) (ShN dims) body
+  | length tileDims /= length dims =
+      invalidProgUsage "parForTileN requires tile extents with the same rank as the shape"
+  | length origin /= length dims =
+      invalidProgUsage "parForTileN requires an origin with the same rank as the shape"
+  | any (<= 0) tileDims =
+      invalidProgUsage "parForTileN requires positive tile extents"
+  | any (< 0) origin =
+      invalidProgUsage "parForTileN requires non-negative tile origins"
+  | any (< 0) dims =
+      invalidProgUsage "parForTileN requires non-negative shape extents"
+  | otherwise =
+      parForRectN (RectN origin (zipWith3 tileUpperBound dims origin tileDims)) body
+
+{-# INLINE tiledForN #-}
+tiledForN :: [Int] -> ShN -> (IxN -> Prog ()) -> Prog ()
+tiledForN tileDims shape@(ShN dims) body
+  | length tileDims /= length dims =
+      invalidProgUsage "tiledForN requires tile extents with the same rank as the shape"
+  | otherwise =
+      tileN tileDims shape $ \origin ->
+        parForTileN tileDims origin shape body
 
 {-# INLINE tiledFor2D #-}
 tiledFor2D :: Int -> Int -> Sh2 -> (Int -> Int -> Prog ()) -> Prog ()
@@ -2180,6 +2468,151 @@ invalidUsageRepr = error
 invalidProgUsage :: String -> Prog a
 invalidProgUsage msg = Prog $ \_ -> error msg
 
+{-# INLINE decodeLinearIndexN #-}
+decodeLinearIndexN :: [Int] -> Int -> [Int]
+decodeLinearIndexN dims linear =
+  go (reverse dims) linear []
+  where
+    go [] !_ acc = acc
+    go (dim : rest) !n acc =
+      let (!q, !r) = quotRem n dim
+       in go rest q (r : acc)
+
+{-# INLINE tileCountInt #-}
+tileCountInt :: Int -> Int -> Int
+tileCountInt n width
+  | n <= 0 = 0
+  | otherwise = ((n - 1) `quot` width) + 1
+
+{-# INLINE tileUpperBound #-}
+tileUpperBound :: Int -> Int -> Int -> Int
+tileUpperBound extent origin width =
+  min extent (origin + width)
+
+{-# INLINE dotProduct #-}
+dotProduct :: [Int] -> [Int] -> Int
+dotProduct xs ys = sum (zipWith (*) xs ys)
+
+{-# INLINE multiplyMatrixVector #-}
+multiplyMatrixVector :: [[Int]] -> [Int] -> [Int]
+multiplyMatrixVector rows vec =
+  map (`dotProduct` vec) rows
+
+{-# INLINE columnsOf #-}
+columnsOf :: [[Int]] -> [[Int]]
+columnsOf [] = []
+columnsOf rows@(row0 : _)
+  | all ((== length row0) . length) rows =
+      [ [row !! i | row <- rows] | i <- [0 .. length row0 - 1] ]
+  | otherwise =
+      error "columnsOf requires rectangular matrices"
+
+{-# INLINE affineInputRank #-}
+affineInputRank :: AffineN -> Int
+affineInputRank (AffineN rows _) =
+  case rows of
+    [] -> 0
+    row0 : _ -> length row0
+
+rectCornersN :: RectN -> [[Int]]
+rectCornersN rect@(RectN lo hi)
+  | isEmptyRectN rect = []
+  | otherwise =
+      sequence [[lower, upper - 1] | (lower, upper) <- zip lo hi]
+
+renderIntList :: [Int] -> String
+renderIntList =
+  foldr
+    (\x acc -> if null acc then show x else show x ++ "," ++ acc)
+    ""
+
+isPermutation :: [Int] -> Bool
+isPermutation xs =
+  let sorted = sortIntList xs
+   in sorted == [0 .. length xs - 1]
+
+sortIntList :: [Int] -> [Int]
+sortIntList [] = []
+sortIntList (x : xs) =
+  insertSorted x (sortIntList xs)
+
+insertSorted :: Int -> [Int] -> [Int]
+insertSorted x [] = [x]
+insertSorted x ys@(y : rest)
+  | x <= y = x : ys
+  | otherwise = y : insertSorted x rest
+
+invertIntegerMatrix :: [[Int]] -> Maybe [[Int]]
+invertIntegerMatrix rows
+  | null rows = Just []
+  | any ((/= rank) . length) rows = Nothing
+  | otherwise = go 0 augmented >>= traverse (traverse rationalToIntMaybe)
+  where
+    rank = length rows
+    identityRows :: [[Rational]]
+    identityRows =
+      [ [if i == j then 1 % 1 else 0 % 1 | j <- [0 .. rank - 1]]
+      | i <- [0 .. rank - 1]
+      ]
+    augmented :: [[Rational]]
+    augmented =
+      zipWith (++) (map (map (\x -> toInteger x % 1)) rows) identityRows
+
+    go i mat
+      | i >= rank = do
+          let (left, right) = unzip [splitAt rank row | row <- mat]
+          if left == identityRows
+            then pure right
+            else Nothing
+      | otherwise = do
+          pivot <- findPivotRow i mat
+          let swapped = swapRows i pivot mat
+              pivotRow = swapped !! i
+              pivotVal = pivotRow !! i
+          if pivotVal == 0
+            then Nothing
+            else
+              let normalized = replaceAt i (map (/ pivotVal) pivotRow) swapped
+                  pivotRow' = normalized !! i
+                  eliminated =
+                    [ if rowIx == i
+                        then row
+                        else
+                          let factor = row !! i
+                           in zipWith (\x y -> x - factor * y) row pivotRow'
+                    | (rowIx, row) <- zip [0 ..] normalized
+                    ]
+               in go (i + 1) eliminated
+
+findPivotRow :: Int -> [[Rational]] -> Maybe Int
+findPivotRow col rows =
+  case [rowIx | (rowIx, row) <- zip [col ..] (drop col rows), row !! col /= 0] of
+    pivot : _ -> Just pivot
+    [] -> Nothing
+
+swapRows :: Int -> Int -> [a] -> [a]
+swapRows i j xs
+  | i == j = xs
+  | otherwise =
+      [ pick k | k <- [0 .. length xs - 1] ]
+  where
+    xi = xs !! i
+    xj = xs !! j
+    pick k
+      | k == i = xj
+      | k == j = xi
+      | otherwise = xs !! k
+
+replaceAt :: Int -> a -> [a] -> [a]
+replaceAt i x xs =
+  take i xs ++ [x] ++ drop (i + 1) xs
+
+rationalToIntMaybe :: Rational -> Maybe Int
+rationalToIntMaybe q =
+  if denominator q == 1
+    then Just (fromInteger (numerator q))
+    else Nothing
+
 withParallelTeam :: Int -> (Team -> IO a) -> IO a
 withParallelTeam workers = bracket (newParallelTeam workers) stopParallelTeam
 
@@ -2277,6 +2710,10 @@ chunkSizeFor workers total =
 rectOfShape2 :: Sh2 -> Rect2
 rectOfShape2 (Sh2 rows cols) = Rect2 0 0 rows cols
 
+{-# INLINE rectOfShapeN #-}
+rectOfShapeN :: ShN -> RectN
+rectOfShapeN (ShN dims) = RectN (replicate (length dims) 0) dims
+
 {-# INLINE transposeRect2 #-}
 transposeRect2 :: Rect2 -> Rect2
 transposeRect2 (Rect2 rowLo colLo rowHi colHi) =
@@ -2287,10 +2724,101 @@ isEmptyRect2 :: Rect2 -> Bool
 isEmptyRect2 (Rect2 rowLo colLo rowHi colHi) =
   rowHi <= rowLo || colHi <= colLo
 
+{-# INLINE isEmptyRectN #-}
+isEmptyRectN :: RectN -> Bool
+isEmptyRectN (RectN lo hi) =
+  length lo /= length hi || or (zipWith (>=) lo hi)
+
 {-# INLINE inRect2 #-}
 inRect2 :: Rect2 -> Ix2 -> Bool
 inRect2 (Rect2 rowLo colLo rowHi colHi) (Ix2 row col) =
   row >= rowLo && row < rowHi && col >= colLo && col < colHi
+
+{-# INLINE inRectN #-}
+inRectN :: RectN -> IxN -> Bool
+inRectN (RectN lo hi) (IxN is) =
+  length lo == length hi
+    && length lo == length is
+    && and (zipWith3 (\lower upper i -> i >= lower && i < upper) lo hi is)
+
+applyScheduleN :: ScheduleN -> RectN -> (IxN -> Prog ()) -> Prog ()
+applyScheduleN (ScheduleN stages) =
+  go stages
+  where
+    go [] rect emit =
+      parForRectN rect emit
+    go (ScheduleAffineStageN affine : rest) rect emit =
+      applyAffineRectN affine rect (\rect' emit' -> go rest rect' emit') emit
+    go (ScheduleTileStageN tileDims : rest) rect emit =
+      tileRectN tileDims rect (\rect' -> go rest rect' emit)
+
+{-# INLINE applyAffineRectN #-}
+applyAffineRectN ::
+  AffineN ->
+  RectN ->
+  (RectN -> (IxN -> Prog ()) -> Prog ()) ->
+  (IxN -> Prog ()) ->
+  Prog ()
+applyAffineRectN affine rect k emit =
+  case invertAffineN affine of
+    Nothing ->
+      invalidProgUsage "affine schedule stages must be invertible integer transforms"
+    Just inverse ->
+      let box = boundingBoxAffineN affine rect
+          emit' ix =
+            let source = applyAffineN inverse ix
+             in if inRectN rect source
+                  then emit source
+                  else pure ()
+       in k box emit'
+
+{-# INLINE tileRectN #-}
+tileRectN :: [Int] -> RectN -> (RectN -> Prog ()) -> Prog ()
+tileRectN tileDims (RectN lo hi) body
+  | length tileDims /= length lo || length lo /= length hi =
+      invalidProgUsage "tileRectN requires tile extents and bounds with matching ranks"
+  | any (<= 0) tileDims =
+      invalidProgUsage "tileRectN requires positive tile extents"
+  | otherwise =
+      tileN tileDims (ShN extents) $ \(IxN offset) ->
+        let start = zipWith (+) lo offset
+         in body (RectN start (zipWith3 tileUpperBound hi start tileDims))
+  where
+    extents = zipWith (-) hi lo
+
+{-# INLINE normalizeScheduleN #-}
+normalizeScheduleN :: ScheduleN -> ScheduleN
+normalizeScheduleN (ScheduleN stages) =
+  ScheduleN (normalizeScheduleStagesN stages)
+
+normalizeScheduleStagesN :: [ScheduleStageN] -> [ScheduleStageN]
+normalizeScheduleStagesN stages =
+  reverse (go stages Nothing [])
+  where
+    go [] pending acc =
+      flushAffineStageN pending acc
+    go (ScheduleAffineStageN affine : rest) pending acc =
+      go rest (Just (maybe affine (composeAffineN affine) pending)) acc
+    go (ScheduleTileStageN tileDims : rest) pending acc =
+      go rest Nothing (ScheduleTileStageN tileDims : flushAffineStageN pending acc)
+
+flushAffineStageN :: Maybe AffineN -> [ScheduleStageN] -> [ScheduleStageN]
+flushAffineStageN Nothing acc = acc
+flushAffineStageN (Just affine) acc
+  | isIdentityAffineN affine = acc
+  | otherwise = ScheduleAffineStageN affine : acc
+
+{-# INLINE isIdentityAffineN #-}
+isIdentityAffineN :: AffineN -> Bool
+isIdentityAffineN affine =
+  all
+    (\point -> unIxN (applyAffineN affine (IxN point)) == point)
+    samplePoints
+  where
+    rank = affineInputRank affine
+    samplePoints =
+      replicate rank 0
+        : [[if i == axis then 1 else 0 | i <- [0 .. rank - 1]] | axis <- [0 .. rank - 1]]
 
 data StructuredAffine2D
   = StructuredIdentity

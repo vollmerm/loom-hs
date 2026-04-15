@@ -17,6 +17,7 @@ import Loom.Benchmark.Kernels
   , runDoubleTiledMatMulVectorizedExample
   , runInt32TiledMatMulScalarExample
   , runInt32TiledMatMulVectorizedExample
+  , runJacobi1DExample
   , runMatMulExample
   , runNBodyExample
   , runPolyhedralTiledMatMulExample
@@ -24,6 +25,7 @@ import Loom.Benchmark.Kernels
   , runRedBlackStencilExample
   , runSeparableBlurExample
   , runThreePhaseNormalizeExample
+  , runVerifiedJacobi1DExample
   , runWavefrontEditDistanceExample
   )
 
@@ -31,9 +33,14 @@ main :: IO ()
 main = do
   testArrayUpdate
   testIndexHelpers
+  testIndexHelpersN
   testAffine2Basics
+  testAffineNBasics
   testShapeLoop1D
   testShapeLoop3D
+  testShapeLoopND
+  testRectLoopND
+  testTiledLoopND
   testReducerSum
   testVerifiedFill
   testVerifiedFill3D
@@ -66,6 +73,10 @@ main = do
   testAffineLoopComposition
   testAffineLoopRejectsSingularTransform
   testTiledRect2D
+  testScheduleNIdentity
+  testScheduleNTile
+  testScheduleNPermuteTile
+  testScheduleNRendering
   testTransform2DIdentity
   testTransform2DTile
   testTransform2DAffineCompose
@@ -96,6 +107,8 @@ main = do
   testMatMulBenchmarkVectorized
   testInt32MatMulBenchmarks
   testDoubleMatMulBenchmarks
+  testJacobi1DBenchmark
+  testVerifiedJacobi1DBenchmark
   testNBodyBenchmark
   putStrLn "All loom-hs tests passed."
 
@@ -118,6 +131,16 @@ testIndexHelpers = do
   assertEqual "index2" 9 (index2 (sh2 3 4) (ix2 2 1))
   assertEqual "index3" 23 (index3 (sh3 2 3 4) (ix3 1 2 3))
 
+testIndexHelpersN :: IO ()
+testIndexHelpersN = do
+  let shape = shN [2, 3, 4, 5]
+      ix = ixN [1, 2, 3, 4]
+      rect = rectN [1, 0, 2] [3, 4, 5]
+  assertEqual "unIxN" [1, 2, 3, 4] (unIxN ix)
+  assertEqual "unShN" [2, 3, 4, 5] (unShN shape)
+  assertEqual "unRectN" ([1, 0, 2], [3, 4, 5]) (unRectN rect)
+  assertEqual "indexN" 119 (indexN shape ix)
+
 testAffine2Basics :: IO ()
 testAffine2Basics = do
   let skew = skew2D 1
@@ -128,6 +151,26 @@ testAffine2Basics = do
   assertEqual "compose affine2" (4, 4) (unIx2 (applyAffine2 composed (ix2 2 3)))
   assertEqual "invert affine2" (Just (2, 3)) (fmap (unIx2 . (`applyAffine2` ix2 4 4)) (invertAffine2 composed))
   assertEqual "bounding box affine2d" (0, 0, 3, 6) (unRect2 box)
+
+testAffineNBasics :: IO ()
+testAffineNBasics = do
+  let skew =
+        affineN
+          [ [1, 0, 0]
+          , [1, 1, 0]
+          , [0, 0, 1]
+          ]
+          [0, 0, 0]
+      perm = permuteAffineN [1, 0, 2]
+      composed = composeAffineN perm skew
+      box = boundingBoxAffineN skew (rectN [0, 0, 0] [2, 3, 4])
+  assertEqual "apply affineN" [1, 3, 3] (unIxN (applyAffineN skew (ixN [1, 2, 3])))
+  assertEqual "compose affineN" [3, 1, 3] (unIxN (applyAffineN composed (ixN [1, 2, 3])))
+  assertEqual
+    "invert affineN"
+    (Just [1, 2, 3])
+    (fmap (unIxN . (`applyAffineN` ixN [3, 1, 3])) (invertAffineN composed))
+  assertEqual "bounding box affineN" ([0, 0, 0], [2, 4, 4]) (unRectN box)
 
 testShapeLoop1D :: IO ()
 testShapeLoop1D = do
@@ -156,6 +199,61 @@ testShapeLoop3D = do
     "shape loop 3d"
     [i * 100 + j * 10 + k | i <- [0 .. depth - 1], j <- [0 .. rows - 1], k <- [0 .. cols - 1]]
     xs
+
+testShapeLoopND :: IO ()
+testShapeLoopND = do
+  let shape = shN [2, 3, 2, 2]
+      expected =
+        [ encodeIxN [i, j, k, l]
+        | i <- [0 .. 1]
+        , j <- [0 .. 2]
+        , k <- [0 .. 1]
+        , l <- [0 .. 1]
+        ]
+  arr <- newArr (length expected)
+  runProg $
+    parForShN shape $ \ix ->
+      writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+  xs <- toList arr
+  assertEqual "shape loop nd" expected xs
+
+testRectLoopND :: IO ()
+testRectLoopND = do
+  let shape = shN [4, 5, 3, 2]
+      rect = rectN [1, 2, 1, 0] [3, 5, 3, 2]
+      expected =
+        [ if i >= 1 && i < 3 && j >= 2 && j < 5 && k >= 1 && k < 3
+            then encodeIxN [i, j, k, l]
+            else 0
+        | i <- [0 .. 3]
+        , j <- [0 .. 4]
+        , k <- [0 .. 2]
+        , l <- [0 .. 1]
+        ]
+  arr <- newArr (product (unShN shape))
+  runProg $
+    parForRectN rect $ \ix ->
+      writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+  xs <- toList arr
+  assertEqual "rect loop nd" expected xs
+
+testTiledLoopND :: IO ()
+testTiledLoopND = do
+  let shape = shN [3, 4, 2, 2]
+      tileShape = [2, 3, 1, 2]
+      expected =
+        [ encodeIxN [i, j, k, l]
+        | i <- [0 .. 2]
+        , j <- [0 .. 3]
+        , k <- [0 .. 1]
+        , l <- [0 .. 1]
+        ]
+  arr <- newArr (length expected)
+  runProg $
+    tiledForN tileShape shape $ \ix ->
+      writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+  xs <- toList arr
+  assertEqual "tiled loop nd" expected xs
 
 testReducerSum :: IO ()
 testReducerSum = do
@@ -640,10 +738,37 @@ testTiledRect2D = do
     [ if i >= 1 && j >= 1
         then i * 10 + j
         else 0
-    | i <- [0 .. rows - 1]
-    , j <- [0 .. cols - 1]
-    ]
+     | i <- [0 .. rows - 1]
+     , j <- [0 .. cols - 1]
+     ]
     xs
+
+testScheduleNIdentity :: IO ()
+testScheduleNIdentity = do
+  xs <- runScheduleFill identityScheduleN
+  assertEqual "schedule n identity" expectedScheduleFill xs
+
+testScheduleNTile :: IO ()
+testScheduleNTile = do
+  xs <- runScheduleFill (tileScheduleN [2, 2, 1])
+  assertEqual "schedule n tile" expectedScheduleFill xs
+
+testScheduleNPermuteTile :: IO ()
+testScheduleNPermuteTile = do
+  let schedule =
+        composeScheduleN
+          (permuteScheduleN [1, 0, 2])
+          (tileScheduleN [2, 2, 1])
+  xs <- runScheduleFill schedule
+  assertEqual "schedule n permute tile" expectedScheduleFill xs
+
+testScheduleNRendering :: IO ()
+testScheduleNRendering = do
+  let schedule =
+        composeScheduleN
+          (affineScheduleN (permuteAffineN [1, 0, 2]))
+          (tileScheduleN [2, 2, 1])
+  assertEqual "schedule n rendering" "affine -> tile(2,2,1)" (renderScheduleN schedule)
 
 testTransform2DIdentity :: IO ()
 testTransform2DIdentity = do
@@ -1117,6 +1242,24 @@ testDoubleMatMulBenchmarks = do
   assertApproxList "double tiled matmul scalar" 1.0e-12 expected tiledScalar
   assertApproxList "double tiled matmul vec" 1.0e-12 expected tiledVec
 
+testJacobi1DBenchmark :: IO ()
+testJacobi1DBenchmark = do
+  let steps = 4
+      input = [0.0, 1.0, 4.0, 2.0, 8.0, 5.0, 3.0, 6.0, 7.0]
+      expected = referenceJacobi1D steps input
+  actual <- runJacobi1DExample steps input
+  assertApproxList "jacobi 1d benchmark" 1.0e-12 expected actual
+
+testVerifiedJacobi1DBenchmark :: IO ()
+testVerifiedJacobi1DBenchmark = do
+  let steps = 4
+      input = [0.0, 1.0, 4.0, 2.0, 8.0, 5.0, 3.0, 6.0, 7.0]
+      expected = referenceJacobi1D steps input
+  actual <- runVerifiedJacobi1DExample steps input
+  baseline <- runJacobi1DExample steps input
+  assertApproxList "verified jacobi 1d benchmark" 1.0e-12 expected actual
+  assertApproxList "verified jacobi matches baseline" 1.0e-12 baseline actual
+
 testNBodyBenchmark :: IO ()
 testNBodyBenchmark = do
   let posX = [-1.0, 0.25, 1.5, -0.75]
@@ -1167,6 +1310,22 @@ referenceNBody posX posY posZ mass =
         invDist = 1.0 / sqrt distSq
         scale = (mass !! j) * invDist * invDist * invDist
 
+referenceJacobi1D :: Int -> [Double] -> [Double]
+referenceJacobi1D steps xs = go steps xs
+  where
+    go 0 ys = ys
+    go n ys = go (n - 1) (step ys)
+    step [] = []
+    step [x] = [x]
+    step [x0, x1] = [x0, x1]
+    step (x0 : x1 : x2 : rest) =
+      x0 : goInterior x0 x1 x2 rest
+    goInterior left center right [] =
+      [0.25 * (left + center + center + right), right]
+    goInterior left center right (next : rest) =
+      0.25 * (left + center + center + right)
+        : goInterior center right next rest
+
 runAffineFill :: Affine2 -> IO [Int]
 runAffineFill transform = do
   let rows = 3
@@ -1193,8 +1352,26 @@ runTransformFill transform = do
           writeArr arr (index2 shape ix) (i * 10 + j)
   toList arr
 
+runScheduleFill :: ScheduleN -> IO [Int]
+runScheduleFill schedule = do
+  let shape = shN [2, 3, 4]
+  arr <- newArr (product (unShN shape))
+  runProg $
+    parallel $
+      parForScheduleN schedule shape $ \ix ->
+        writeArr arr (indexN shape ix) (encodeIxN (unIxN ix))
+  toList arr
+
 expectedAffineFill :: [Int]
 expectedAffineFill = [i * 10 + j | i <- [0 .. 2], j <- [0 .. 4]]
+
+expectedScheduleFill :: [Int]
+expectedScheduleFill =
+  [ encodeIxN [i, j, k]
+  | i <- [0 .. 1]
+  , j <- [0 .. 2]
+  , k <- [0 .. 3]
+  ]
 
 expectedRedBlackStencil :: Int -> [Int] -> [Int]
 expectedRedBlackStencil n input = blackPhase
@@ -1289,6 +1466,10 @@ clampCell n i
   | i < 0 = 0
   | i >= n = n - 1
   | otherwise = i
+
+encodeIxN :: [Int] -> Int
+encodeIxN =
+  foldl (\acc digit -> acc * 10 + digit) 0
 
 assertEqual :: (Eq a, Show a) => String -> a -> a -> IO ()
 assertEqual label expected actual =

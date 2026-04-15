@@ -38,22 +38,28 @@ module Loom.Internal.Polyhedral
 import Data.List (sortOn)
 import Loom.Internal.Kernel
   ( Affine2
+  , AffineN
   , Prog
+  , ScheduleN
   , applyAffine2
+  , affineN
+  , affineScheduleN
   , Sh2
-  , Transform2D
   , barrier
+  , composeScheduleN
   , ix2
   , composeAffine2
-  , composeTransform2D
   , identityAffine2
-  , affineTransform2D
+  , identityScheduleN
   , invertAffine2
+  , parForScheduleN
   , unIx2
+  , unIxN
+  , unSh2
   , parForSh2
-  , parForTransform2D
   , parForWavefront2D
-  , tileTransform2D
+  , shN
+  , tileScheduleN
   , withIx2
   )
 
@@ -303,17 +309,33 @@ lowerPhase2D shape phaseSummary body =
     [ScheduleWavefrontStage2D] ->
       parForWavefront2D shape (\ix -> withIx2 ix body)
     stages ->
-      parForTransform2D (scheduleStagesToTransform2D stages) shape (\ix -> withIx2 ix body)
+      let (rows, cols) = unSh2 shape
+       in parForScheduleN (scheduleStagesToScheduleN stages) (shN [rows, cols]) $ \ix ->
+            case unIxN ix of
+              [i, j] -> body i j
+              _ -> error "scheduleStagesToScheduleN produced a non-2D index"
 
-scheduleStagesToTransform2D :: [ScheduleStage2D] -> Transform2D
-scheduleStagesToTransform2D =
-  foldl' (\acc stage -> composeTransform2D acc (stageToTransform stage)) identityTransform
+scheduleStagesToScheduleN :: [ScheduleStage2D] -> ScheduleN
+scheduleStagesToScheduleN =
+  foldl' (\acc stage -> composeScheduleN acc (stageToScheduleN stage)) identitySchedule
   where
-    identityTransform = affineTransform2D identityAffine2
-    stageToTransform (ScheduleAffineStage2D affine) = affineTransform2D affine
-    stageToTransform (ScheduleTileStage2D tileRows tileCols) = tileTransform2D tileRows tileCols
-    stageToTransform ScheduleWavefrontStage2D =
+    identitySchedule = identityScheduleN
+    stageToScheduleN (ScheduleAffineStage2D affine) = affineScheduleN (affine2ToAffineN affine)
+    stageToScheduleN (ScheduleTileStage2D tileRows tileCols) = tileScheduleN [tileRows, tileCols]
+    stageToScheduleN ScheduleWavefrontStage2D =
       error "wavefront stages are lowered separately"
+
+affine2ToAffineN :: Affine2 -> AffineN
+affine2ToAffineN affine =
+  affineN
+    [ [rowAt e0 - rowAt origin, rowAt e1 - rowAt origin]
+    | rowAt <- [fst . unIx2, snd . unIx2]
+    ]
+    [fst (unIx2 origin), snd (unIx2 origin)]
+  where
+    origin = applyAffine2 affine (ix2 0 0)
+    e0 = applyAffine2 affine (ix2 1 0)
+    e1 = applyAffine2 affine (ix2 0 1)
 
 normalizeScheduleStages :: [ScheduleStage2D] -> [ScheduleStage2D]
 normalizeScheduleStages stages =

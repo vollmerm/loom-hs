@@ -7,6 +7,7 @@ module Loom.Verify
   , Array
   , Index
   , AccessCtx
+  , DVec
   , Prog
   , Reducer
   , ReduceVar
@@ -41,7 +42,11 @@ module Loom.Verify
   , reduce
   , getReducer
   , readAt
+  , readOffsetAt1D
+  , readDVecAt1D
+  , readDVecOffsetAt1D
   , writeAt
+  , writeDVecAt1D
   , readWaveAt
   , writeWaveAt
   , rowOf

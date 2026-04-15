@@ -3,11 +3,16 @@ module Loom
   , Ix1
   , Ix2
   , Ix3
+  , IxN
   , Sh1
   , Sh2
   , Sh3
+  , ShN
   , Rect2
+  , RectN
+  , AffineN
   , Affine2
+  , ScheduleN
   , Transform2D
   , Vec
   , IVec
@@ -20,10 +25,14 @@ module Loom
   , ix1
   , ix2
   , ix3
+  , ixN
   , sh1
   , sh2
   , sh3
+  , shN
   , rect2
+  , rectN
+  , affineN
   , affine2
   , newArr
   , fromList
@@ -31,12 +40,23 @@ module Loom
   , unIx1
   , unIx2
   , unIx3
+  , unIxN
+  , unSh2
+  , unShN
   , unRect2
+  , unRectN
   , withIx2
   , withIx3
   , index1
   , index2
   , index3
+  , indexN
+  , applyAffineN
+  , composeAffineN
+  , invertAffineN
+  , identityAffineN
+  , permuteAffineN
+  , boundingBoxAffineN
   , applyAffine2
   , composeAffine2
   , invertAffine2
@@ -44,6 +64,12 @@ module Loom
   , interchange2D
   , skew2D
   , boundingBoxAffine2D
+  , identityScheduleN
+  , affineScheduleN
+  , tileScheduleN
+  , permuteScheduleN
+  , composeScheduleN
+  , renderScheduleN
   , identityTransform2D
   , affineTransform2D
   , tileTransform2D
@@ -61,19 +87,25 @@ module Loom
   , parForSh1
   , parForSh2
   , parForSh3
+  , parForShN
   , parFor2
   , parFor3
   , parForRect2D
+  , parForRectN
+  , parForScheduleN
   , parForAffineRect2D
   , parForAffine2D
   , parForWavefront2D
   , tileRect2D
+  , tileN
   , tiledForRect2D
   , parForTransform2D
   , tile2D
   , tile3D
+  , parForTileN
   , parForTile2D
   , parForTile3D
+  , tiledForN
   , tiledFor2D
   , tiledFor3D
   , stripMine
