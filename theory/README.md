@@ -1,0 +1,241 @@
+# Theory workspace
+
+This directory contains the mechanized theory workspace for `loom-hs`.
+
+The initial setup is a small, self-contained Agda project:
+
+- `loom-hs-theory.agda-lib` defines the local Agda library,
+- `libraries` pins the local library file set used by `make check`,
+- `src/Loom/Theory/Main.agda` is the initial entry module,
+- `Makefile` provides a basic typechecking target.
+
+## Current theory surface
+
+The initial mechanization now has a first rectangular+tiled core:
+
+- `Loom.Theory.Prelude`
+  - shared Agda imports and basic proof-oriented utilities
+- `Loom.Theory.Shape`
+  - `Rank`, `Shape`, and formal `Array` handles
+- `Loom.Theory.Schedule`
+  - `rect` and `tile` schedules for the first milestone
+- `Loom.Theory.Index`
+  - rectangular indices plus a tiled index view with explicit global reconstruction
+- `Loom.Theory.Access`
+  - `Capability`, `CanRead`, `CanWrite`, and schedule-typed access witnesses
+- `Loom.Theory.Syntax`
+  - a compact intrinsically typed kernel/program syntax for read/write kernels
+- `Loom.Theory.Examples`
+  - initial rectangular and tiled copy-style examples
+- `Loom.Theory.Semantics`
+  - typed array environments plus sequential evaluation for the current kernel fragment
+- `Loom.Theory.Safety`
+  - initial shape/schedule safety lemmas and a first read-after-write property
+- `Loom.Theory.Pointwise`
+  - a proof-facing class of single-write pointwise kernels plus generic `runAt` lemmas
+- `Loom.Theory.TiledPointwise`
+  - a tiled single-step theorem layer phrased directly in terms of resolved global coordinates
+- `Loom.Theory.WholeTiled`
+  - a whole-program tiled correctness layer over explicit finite tiled iteration streams
+- `Loom.Theory.ExactCoverTiled`
+  - a tiled whole-program theorem layer strengthened with an exact-cover witness over outputs
+- `Loom.Theory.ExactCoverRect1`
+  - an exact-cover whole-program theorem layer for 1D rectangular kernels
+- `Loom.Theory.ExactCoverRect2`
+  - an exact-cover whole-program theorem layer for 2D rectangular kernels
+- `Loom.Theory.LoopInterchange`
+  - a column-major rectangular execution semantics plus a loop-interchange post-state equivalence theorem
+- `Loom.Theory.StripMineTiling`
+  - a first strip-mined exact-cover tiled traversal equivalence theorem against rectangular execution
+- `Loom.Theory.SchedulePreservation`
+  - a first schedule-transformation preservation layer for equivalent exact-cover tiled traversals
+- `Loom.Theory.Determinism`
+  - a packaged post-state equivalence theorem for disciplined equivalent tiled traversals
+- `Loom.Theory.Reduction`
+  - a minimal sequential reducer semantics plus 1D array-facing fold operations
+- `Loom.Theory.ReductionTheorems`
+  - first correctness results connecting reducer execution to an explicit recursive sum
+- `Loom.Theory.Traversal`
+  - first-class extracted-friendly traversal enumerators for rectangular and explicit tiled traversals
+- `Loom.Theory.Phase`
+  - a structured phased-program layer for sequencing whole rectangular phases
+- `Loom.Theory.PhaseSemantics`
+  - reference semantics for phased execution, treating phase boundaries as coarse barriers
+- `Loom.Theory.PhaseTheorems`
+  - congruence and composition lemmas showing phased execution preserves post-state equivalence
+- `Loom.Theory.ProgramTheorems`
+  - first program-level correctness theorems for rectangular and tiled copy bodies
+- `Loom.Theory.RectExecution`
+  - whole-program sequential execution for rectangular 1D and 2D kernels
+- `Loom.Theory.FullRunTheorems`
+  - pointwise full-run theorems for the tiny rectangular execution example
+- `Loom.Theory.WholeRect1`
+  - the first generic whole-program pointwise theorem, for 1D rectangular kernels
+- `Loom.Theory.WholeRect2`
+  - the corresponding generic whole-program pointwise theorem for 2D rectangular kernels
+
+## Correspondence to `Loom.Verify`
+
+The Agda modules deliberately mirror a smaller subset of the Haskell verification-facing API:
+
+| Agda module | Main concepts | Related Haskell concepts |
+| --- | --- | --- |
+| `Shape` | `Rank`, `Shape`, `Array` | `Rank`, `Shape`, `Array` |
+| `Schedule` | `rect`, `tile` | `Schedule` without wavefront yet |
+| `Index` | `RectIx`, `TileIx`, `Index` | `Index`, `TileIndex2` |
+| `Access` | capability-indexed accesses | `Capability`, `AccessCtx` |
+| `Syntax` | typed kernel/program fragment | verified loop bodies and array actions |
+| `Semantics` | access resolution, typed environments, sequential evaluation | reference model for future kernel semantics |
+| `Safety` | first intrinsic lemmas | shape/schedule consistency guarantees |
+| `Pointwise` | proof-facing pointwise kernel class | reusable single-step theorem layer |
+| `TiledPointwise` | tiled/global single-step theorem layer | schedule-facing correctness over tiled accesses |
+| `WholeTiled` | whole-program tiled correctness | induction over explicit tiled iteration schedules |
+| `ExactCoverTiled` | exact-cover tiled correctness | whole-run pointwise theorem for every covered output coordinate |
+| `ExactCoverRect1` | exact-cover 1D rectangular correctness | whole-run state characterization for 1D rectangular kernels |
+| `ExactCoverRect2` | exact-cover 2D rectangular correctness | whole-run state characterization for 2D rectangular kernels |
+| `LoopInterchange` | alternate rectangular traversal semantics | loop-interchange equivalence for 2D rectangular kernels |
+| `StripMineTiling` | rectangular vs tiled exact-cover equivalence | first strip-mining / tiling post-state equivalence theorem |
+| `SchedulePreservation` | schedule-transformation preservation | semantic equality for equivalent exact-cover tiled traversals |
+| `Determinism` | post-state equivalence for disciplined traversals | first paper-facing determinism/race-freedom stepping stone |
+| `Reduction` | sequential reducer semantics | proof-friendly model for `foldFor` / `foldFor1D` style reductions |
+| `ReductionTheorems` | first reducer correctness results | explicit summation semantics for `sumReducer` |
+| `Traversal` | first-class traversal enumerators | extraction-friendly traversal descriptors for verified execution order |
+| `Phase`, `PhaseSemantics`, `PhaseTheorems` | phased rectangular programs and barrier-style composition | structured phase sequencing corresponding to coarse barrier boundaries |
+| `ProgramTheorems` | program-level correctness facts | whole-body reasoning over verified kernels |
+| `RectExecution` | whole-program rectangular execution | sequential traversal of rectangular kernels |
+| `WholeRect1` | generic whole-program theorem | first induction proof over complete execution |
+| `WholeRect2` | generic 2D whole-program theorem | nested induction proof over complete execution |
+| `FullRunTheorems` | pointwise whole-program facts | first full-run results over complete executions |
+
+This is intentionally a correspondence layer rather than a full formal clone of `Loom.Verify`.
+Wavefront, richer reducer effects, and runtime details remain deferred. Barriers are now modeled
+only in a structured way, as separators between whole rectangular phases rather than as arbitrary
+kernel effects.
+
+### Current API coverage audit
+
+The current Agda core most directly mirrors these parts of `Loom.Verify`:
+
+| `Loom.Verify` surface | Agda status | Main Agda modules |
+| --- | --- | --- |
+| `Rank`, `Shape`, `Array`, `Index` | covered for 1D and 2D | `Shape`, `Index` |
+| `Schedule`, rectangular traversal, tiled 2D traversal | covered for `rect` and 2D `tile` | `Schedule`, `RectExecution`, `WholeTiled` |
+| `Capability`, access witnesses, read/write discipline | covered for read/write capabilities | `Access`, `Syntax`, `Semantics` |
+| `readAt`, `writeAt`-style verified array actions | covered as typed kernel primitives | `Syntax`, `Semantics` |
+| `parFor1D`, `parFor2D` | covered via first-class traversal enumerators, sequential whole-program reference execution, exact-cover rectangular state theorems, and a first interchange theorem for 2D | `Traversal`, `RectExecution`, `WholeRect1`, `WholeRect2`, `ExactCoverRect1`, `ExactCoverRect2`, `LoopInterchange` |
+| `parForTiled2D` | covered via tiled single-step, whole-program theorems, and a first strip-mined equivalence result against rectangular execution | `TiledPointwise`, `WholeTiled`, `ExactCoverTiled`, `StripMineTiling`, `Determinism` |
+| `foldFor1D`, reducer story | partially covered by sequential reducer semantics and first proofs | `Reduction`, `ReductionTheorems` |
+| `parallel` regions separated by `barrier` | partially covered for rectangular kernels via phased-program sequencing over the shared store model | `Phase`, `PhaseSemantics`, `PhaseTheorems` |
+
+The current Agda theory does **not** yet model these `Loom.Verify` features directly:
+
+| `Loom.Verify` surface | Current status |
+| --- | --- |
+| `shape3`, `rectIx3`, `parFor3D`, `parForTiled3D`, `unIndex3` | not yet modeled |
+| `parForWavefront2D`, `WaveOffset`, `readWaveAt`, `writeWaveAt`, `waveCoordsOf` | intentionally deferred |
+| `AccessCtx` as a richer explicit context API | simplified into capability-indexed access witnesses |
+| arbitrary `barrier` placement, nested parallel runtime behavior | still intentionally outside the current sequential reference model |
+| `DVec` and vectorized array helpers | intentionally omitted from the mechanized core |
+| `newReducer`, `reduce`, `getReducer` as mutable reducer operations | currently represented only by a sequential mathematical reducer model |
+
+For paper purposes, this is the intended split: the mechanization aims to justify the
+verification-facing design principles and theorem story, not to reproduce every library
+feature or low-level runtime operation one-for-one.
+
+### Aligned example set
+
+The current paper-facing examples are meant to stay synchronized across the mechanization and
+the `Loom.Verify` story:
+
+| Agda example family | Intended `Loom.Verify` narrative |
+| --- | --- |
+| `line-rect-copy`, `line-rect-inc` | simple `parFor1D` / `foldFor1D` kernels over a 1D verified shape |
+| `tiny-rect-copy`, `tiny-rect-inc` | small `parFor2D` kernels with whole-run rectangular reasoning |
+| `tiled-copy` | `parForTiled2D` with exact-cover traversal reasoning and schedule invariance |
+
+This gives the paper a compact kernel set that can be presented once and then reused across the
+API explanation, Agda theorems, and benchmark-facing discussion.
+
+### Structured barrier extension
+
+The theory now has a first barrier-facing extension, but it is intentionally coarse:
+
+- a kernel body is still barrier-free,
+- a phased program is a sequence of whole rectangular phases,
+- and the boundary between phases is the semantics of a coarse global barrier.
+
+This matches the intended proof story for `Loom.Verify`: the Agda development justifies a
+structured staged-execution fragment without trying to formalize the full worker/runtime
+synchronization behavior of the Haskell implementation.
+
+### Traversal extraction direction
+
+The theory now includes a first-class traversal enumerator layer. The immediate purpose of this
+layer is to make execution order explicit in a form that is:
+
+- reusable across rectangular and explicit tiled execution,
+- directly connected to the current exact-cover and transformation theorems,
+- and structurally suitable for later Agda-to-Haskell extraction.
+
+Both the 2D rectangular execution layer and the explicit tiled whole-program / transformation
+layers now route through this shared traversal story:
+
+- rectangular execution uses canonical row-major and column-major enumerators,
+- tiled execution uses a shared linear-traversal wrapper over enumerators,
+- and the schedule-preservation / determinism theorems now store traversal objects rather than
+  raw one-off step functions.
+
+The next extraction-oriented step on the tiled side is not a representation refactor anymore; it
+is to extend this shared traversal layer into the phased-program story so tiled phases can reuse
+the same barrier-style composition machinery as rectangular phases.
+
+The repository now also contains an extraction-oriented path for the rectangular traversal layer:
+
+- `Loom.Theory.Traversal.Export` exposes concrete Agda coordinate lists for canonical traversals,
+- Agda compilation produces generated Haskell under `theory/src/MAlonzo/Code/`,
+- and `theory/extracted/Loom/Verify/Traversal.hs` is a thin handwritten wrapper around the
+  generated module.
+
+The current wrapper exposes:
+
+- `rect1Coords`
+- `rowMajorCoords2D`
+- `columnMajorCoords2D`
+
+This is intentionally a metadata path, not a runtime replacement.
+
+To regenerate the extracted Agda Haskell for this path, run:
+
+```bash
+cd theory
+make compile-traversal-export
+ghc -fno-code -itheory/src -itheory/extracted theory/extracted/Loom/Verify/Traversal.hs
+```
+
+The first command regenerates the MAlonzo output for `Loom.Theory.Traversal.Export`. The second
+checks the thin Haskell wrapper that consumes the generated module.
+
+### N-dimensional outlook
+
+The Haskell verification-facing API already exposes 3D loop forms such as `shape3`, `rectIx3`,
+`parFor3D`, and `parForTiled3D`.
+
+The current Agda mechanization does **not** yet prove arbitrary-rank results. It establishes the
+theorem story concretely for 1D and 2D fragments, especially:
+
+- exact-cover whole-run state characterization for rectangular kernels,
+- exact-cover whole-run pointwise/state reasoning for tiled 2D traversals,
+- and post-state equivalence for disciplined equivalent tiled traversals.
+
+For the paper, the defensible general statement is that this proof architecture appears to scale to
+finite product domains of higher rank, but only the 1D/2D fragments are mechanized today. A future
+rank-polymorphic development would need generic shape/index/traversal induction rather than the
+current hand-rolled 1D and 2D inductions.
+
+## Typecheck the theory
+
+From this directory, run:
+
+```bash
+make check
+```

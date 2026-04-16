@@ -1,0 +1,3 @@
+name: loom-hs-theory
+include: src
+depend: standard-library-2.3
