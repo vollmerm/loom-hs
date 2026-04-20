@@ -69,12 +69,62 @@ The initial mechanization now has a first rectangular+tiled core:
   - whole-program sequential execution for rectangular 1D and 2D kernels
 - `Loom.Theory.FullRunTheorems`
   - pointwise full-run theorems for the tiny rectangular execution example
+- `Loom.Theory.WholeLinear`
+  - **generic** whole-program pointwise theorem, parameterized by rank, schedule, domain, and a
+    `LinearTraversal {A = Index sched dom} n`; the unifying generalization over `WholeRect1` and
+    `WholeTiled`
 - `Loom.Theory.WholeRect1`
-  - the first generic whole-program pointwise theorem, for 1D rectangular kernels
+  - 1D rectangular whole-program pointwise theorem; now a thin wrapper over `WholeLinear`
 - `Loom.Theory.WholeRect2`
-  - the corresponding generic whole-program pointwise theorem for 2D rectangular kernels
+  - the corresponding generic whole-program pointwise theorem for 2D rectangular kernels (nested
+    row/column induction); exposes `toWholeKernel` and `runRect2-eq-runWhole` bridges to
+    `WholeLinear` via the row-major `Fin rows × Fin cols ↔ Fin (rows * cols)` flattening bijection
+- `Loom.Theory.ExactCoverLinear`
+  - **generic** exact-cover state-characterization theorem, parameterized by a `WholeLinear.WholeKernel`;
+    `runWhole-state-eq` is the unified whole-run correctness statement for 1D rectangular, tiled,
+    and (via flattening) 2D rectangular instances; all three families now bridge into this layer
+- `Loom.Theory.ObservationalEquivalence`
+  - **paper-facing headline theorem**: `obs-correct` states that any `WellFormedKernel` (satisfying
+    access discipline + coverage discipline) is observationally equivalent to its `pointwiseSpec`;
+    a thin re-packaging of `ExactCoverLinear.runWhole-state-eq` with paper-friendly names, explicit
+    discipline documentation, and a concrete 1D example
 
-## Correspondence to `Loom.Verify`
+### 2D flattening via `foldFin-product`
+
+All three `ExactCover*` families now share a single proof spine in `ExactCoverLinear`. Connecting
+`WholeRect2` to `WholeLinear` required a bijection between a 2D iteration domain and a flat linear
+index. The approach uses the stdlib `combine : Fin m → Fin n → Fin (m * n)` /
+`remQuot : ∀ n → Fin (m * n) → Fin m × Fin n` pair from `Data.Fin.Base`.
+
+The key new lemma in `Loom.Theory.Traversal` is:
+
+```agda
+foldFin-product :
+  ∀ {A : Set} {rows cols : ℕ} →
+  (f : Fin rows → Fin cols → A → A) →
+  (init : A) →
+  foldFin (λ i acc → foldFin (f i) acc) init ≡
+  foldFin (λ flat acc → let (i , j) = remQuot cols flat in f i j acc) init
+```
+
+This says nested `foldFin` over `rows × cols` steps equals a single flat `foldFin` over
+`rows * cols` steps, with 2D coordinates recovered via `remQuot`. The proof is by induction on
+`rows`, using two auxiliary lemmas:
+
+- `foldFin-append`: splits a flat fold over `outer + inner` steps into an inner-first,
+  outer-second pass, using the `_↑ˡ_` / `_↑ʳ_` index injections.
+- `foldFin-cong`: rewrites the body of a flat fold pointwise (the fold analogue of `cong`).
+
+`remQuot-↑ˡ` and `remQuot-↑ʳ` connect `remQuot` applied to left/right-injected indices back to
+`remQuot-combine` from `Data.Fin.Properties`.
+
+The bridge `WholeRect2.toWholeKernel` uses `Traversal.linearTraversal (remQuot cols)` as the step
+function so the flat index unfolds to the correct 2D coordinate. The bridge
+`WholeRect2.runRect2-eq-runWhole` is then a direct one-line application of `foldFin-product`.
+`ExactCoverRect2.toExactCoverKernel` maps `(coverRow, coverCol)` to `combine row col` and recovers
+the cover witness via `remQuot-combine`.
+
+
 
 The Agda modules deliberately mirror a smaller subset of the Haskell verification-facing API:
 
@@ -89,10 +139,12 @@ The Agda modules deliberately mirror a smaller subset of the Haskell verificatio
 | `Safety` | first intrinsic lemmas | shape/schedule consistency guarantees |
 | `Pointwise` | proof-facing pointwise kernel class | reusable single-step theorem layer |
 | `TiledPointwise` | tiled/global single-step theorem layer | schedule-facing correctness over tiled accesses |
-| `WholeTiled` | whole-program tiled correctness | induction over explicit tiled iteration schedules |
-| `ExactCoverTiled` | exact-cover tiled correctness | whole-run pointwise theorem for every covered output coordinate |
-| `ExactCoverRect1` | exact-cover 1D rectangular correctness | whole-run state characterization for 1D rectangular kernels |
-| `ExactCoverRect2` | exact-cover 2D rectangular correctness | whole-run state characterization for 2D rectangular kernels |
+| `WholeTiled` | whole-program tiled correctness; exposes `toWholeKernel` bridge to `WholeLinear` | induction over explicit tiled iteration schedules |
+| `ExactCoverTiled` | exact-cover tiled correctness; exposes `toExactCoverKernel` bridge to `ExactCoverLinear` | whole-run pointwise theorem for every covered output coordinate |
+| `ExactCoverRect1` | exact-cover 1D rectangular correctness; exposes `toExactCoverKernel` bridge to `ExactCoverLinear` | whole-run state characterization for 1D rectangular kernels |
+| `ExactCoverRect2` | exact-cover 2D rectangular correctness; exposes `toExactCoverKernel` bridge to `ExactCoverLinear` via `combine`/`remQuot` flattening | whole-run state characterization for 2D rectangular kernels |
+| `WholeLinear` | **generic** whole-program pointwise theorem over any `LinearTraversal` | parameterized by rank, schedule, domain; unifies `WholeRect1` and `WholeTiled` |
+| `ExactCoverLinear` | **generic** exact-cover state-characterization theorem over `WholeLinear.WholeKernel` | `runWhole-state-eq` is the unified whole-run correctness statement |
 | `LoopInterchange` | alternate rectangular traversal semantics | loop-interchange equivalence for 2D rectangular kernels |
 | `StripMineTiling` | rectangular vs tiled exact-cover equivalence | first strip-mining / tiling post-state equivalence theorem |
 | `SchedulePreservation` | schedule-transformation preservation | semantic equality for equivalent exact-cover tiled traversals |
@@ -104,7 +156,7 @@ The Agda modules deliberately mirror a smaller subset of the Haskell verificatio
 | `ProgramTheorems` | program-level correctness facts | whole-body reasoning over verified kernels |
 | `RectExecution` | whole-program rectangular execution | sequential traversal of rectangular kernels |
 | `WholeRect1` | generic whole-program theorem | first induction proof over complete execution |
-| `WholeRect2` | generic 2D whole-program theorem | nested induction proof over complete execution |
+| `WholeRect2` | generic 2D whole-program theorem; exposes `toWholeKernel` / `runRect2-eq-runWhole` bridges to `WholeLinear` via `foldFin-product` | nested induction proof over complete execution; flattened to generic layer |
 | `FullRunTheorems` | pointwise whole-program facts | first full-run results over complete executions |
 
 This is intentionally a correspondence layer rather than a full formal clone of `Loom.Verify`.
@@ -122,8 +174,8 @@ The current Agda core most directly mirrors these parts of `Loom.Verify`:
 | `Schedule`, rectangular traversal, tiled 2D traversal | covered for `rect` and 2D `tile` | `Schedule`, `RectExecution`, `WholeTiled` |
 | `Capability`, access witnesses, read/write discipline | covered for read/write capabilities | `Access`, `Syntax`, `Semantics` |
 | `readAt`, `writeAt`-style verified array actions | covered as typed kernel primitives | `Syntax`, `Semantics` |
-| `parFor1D`, `parFor2D` | covered via first-class traversal enumerators, sequential whole-program reference execution, exact-cover rectangular state theorems, and a first interchange theorem for 2D | `Traversal`, `RectExecution`, `WholeRect1`, `WholeRect2`, `ExactCoverRect1`, `ExactCoverRect2`, `LoopInterchange` |
-| `parForTiled2D` | covered via tiled single-step, whole-program theorems, and a first strip-mined equivalence result against rectangular execution | `TiledPointwise`, `WholeTiled`, `ExactCoverTiled`, `StripMineTiling`, `Determinism` |
+| `parFor1D`, `parFor2D` | covered via first-class traversal enumerators, sequential whole-program reference execution, exact-cover rectangular state theorems, a first interchange theorem for 2D, and a generic `LinearTraversal`-indexed whole-program correctness layer | `Traversal`, `RectExecution`, `WholeLinear`, `WholeRect1`, `WholeRect2`, `ExactCoverLinear`, `ExactCoverRect1`, `ExactCoverRect2`, `LoopInterchange` |
+| `parForTiled2D` | covered via tiled single-step, whole-program theorems, a generic `LinearTraversal` bridge, and a first strip-mined equivalence result against rectangular execution | `TiledPointwise`, `WholeTiled`, `ExactCoverTiled`, `WholeLinear`, `ExactCoverLinear`, `StripMineTiling`, `Determinism` |
 | `foldFor1D`, reducer story | partially covered by sequential reducer semantics and first proofs | `Reduction`, `ReductionTheorems` |
 | `parallel` regions separated by `barrier` | partially covered for rectangular kernels via phased-program sequencing over the shared store model | `Phase`, `PhaseSemantics`, `PhaseTheorems` |
 
@@ -225,12 +277,45 @@ theorem story concretely for 1D and 2D fragments, especially:
 
 - exact-cover whole-run state characterization for rectangular kernels,
 - exact-cover whole-run pointwise/state reasoning for tiled 2D traversals,
-- and post-state equivalence for disciplined equivalent tiled traversals.
+- post-state equivalence for disciplined equivalent tiled traversals, and
+- a **unified generic layer** (`WholeLinear` / `ExactCoverLinear`) that all three families
+  (1D rectangular, tiled, and 2D rectangular) now bridge into via a flat index bijection.
 
 For the paper, the defensible general statement is that this proof architecture appears to scale to
 finite product domains of higher rank, but only the 1D/2D fragments are mechanized today. A future
 rank-polymorphic development would need generic shape/index/traversal induction rather than the
 current hand-rolled 1D and 2D inductions.
+
+## Paper-facing theorem ladder
+
+The mechanization now has a clearer proof ladder for a paper-oriented story:
+
+0. **headline theorem**: any well-formed kernel (access + coverage discipline) is observationally
+   equivalent to its pointwise specification (`ObservationalEquivalence.obs-correct`)
+1. single-step pointwise correctness (`Pointwise`, `TiledPointwise`)
+2. whole-program exact-cover correctness (`WholeRect1`, `WholeRect2`, `ExactCoverRect1`, `ExactCoverRect2`, `WholeTiled`, `ExactCoverTiled`)
+3. first rectangular schedule-transformation result via loop interchange (`LoopInterchange`)
+4. first rectangular-to-tiled strip-mining equivalence result (`StripMineTiling`)
+5. schedule-invariant output preservation for equivalent disciplined traversals (`SchedulePreservation`)
+6. packaged post-state equivalence for those traversals (`Determinism`)
+7. phased rectangular composition over coarse barrier boundaries (`Phase`, `PhaseSemantics`, `PhaseTheorems`)
+
+The `ObservationalEquivalence` module re-packages the generic `ExactCoverLinear.runWhole-state-eq`
+proof under paper-friendly names.  The key concepts it exposes are:
+
+| Paper name | Agda name | Meaning |
+|---|---|---|
+| `WellFormedKernel` | `ExactCoverKernel` | bundled access + coverage discipline |
+| `pointwiseSpec` | `expectedOutput` | the per-cell specification function |
+| `run` | `runWhole ∘ wholeKernel` | whole-program execution |
+| `obs-correct` | `runWhole-state-eq` | the headline observational equivalence |
+| `obs-correct-at` | `runWhole-covered-pointwise` | per-output-cell corollary |
+| `obs-correct-unrelated` | `runWhole-unrelated` | unrelated-array preservation |
+
+The current main targets beyond this are to strengthen the affine/transformation story beyond loop
+interchange, to extend the determinism layer into a more explicit race-freedom or disciplined
+parallel safety theorem, and to continue extending the reduction story enough to support the
+paper's `foldFor` claims.
 
 ## Typecheck the theory
 
@@ -239,3 +324,13 @@ From this directory, run:
 ```bash
 make check
 ```
+
+## Next steps
+
+The next modules should extend this core with:
+
+- canonical tiled traversals and stronger schedule-preserving transformation theorems,
+- richer reducer correctness and eventually transformation theorems beyond exact-cover tiled traversals,
+- additional computed-kernel examples beyond copy,
+- extending the structured phased layer from rectangular phases to tiled phases,
+- and later, optional wavefront support.

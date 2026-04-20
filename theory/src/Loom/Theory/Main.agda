@@ -4,7 +4,9 @@ module Loom.Theory.Main where
 
 open import Loom.Theory.Access
 open import Loom.Theory.Determinism
+open import Loom.Theory.ObservationalEquivalence
 open import Loom.Theory.Examples
+open import Loom.Theory.ExactCoverLinear
 open import Loom.Theory.ExactCoverRect1
 open import Loom.Theory.ExactCoverRect2
 open import Loom.Theory.ExactCoverTiled using () renaming (wholeKernel to tiledWholeKernel)
@@ -31,6 +33,7 @@ open import Loom.Theory.Syntax
 open import Loom.Theory.Traversal
 open import Loom.Theory.Traversal.Export
 open import Loom.Theory.TiledPointwise
+open import Loom.Theory.WholeLinear
 open import Loom.Theory.WholeTiled
 open import Loom.Theory.WholeRect1
 open import Loom.Theory.WholeRect2
@@ -83,3 +86,15 @@ line-inc-sum-demo = line-inc-sum-is-15
 
 line-phased-demo : lookupEnv (runPhases line-initial line-copy-then-inc) line-inc-output line-2 ≡ 5
 line-phased-demo = line-phased-output-2
+
+-- Observational equivalence: the line-copy kernel satisfies obs-correct.
+line-copy-obs-demo :
+  PostStateEq
+    (run line-initial line-copy-wfk)
+    (pointwiseSpec line-copy-wfk line-initial)
+line-copy-obs-demo = line-copy-obs-correct
+
+-- The output at index 2 equals 4, witnessed via the specification.
+line-copy-obs-at-2-demo :
+  lookupEnv (run line-initial line-copy-wfk) line-output line-2 ≡ 4
+line-copy-obs-at-2-demo = line-copy-output-at-2
