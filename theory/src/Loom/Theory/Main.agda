@@ -28,6 +28,9 @@ open import Loom.Theory.SchedulePreservation
 open import Loom.Theory.Schedule
 open import Loom.Theory.Semantics
 open import Loom.Theory.Shape
+open import Loom.Theory.PolyhedralModel
+open import Loom.Theory.ScheduleEquivalence
+open import Loom.Theory.ScheduleIndependent
 open import Loom.Theory.StripMineTiling
 open import Loom.Theory.Syntax
 open import Loom.Theory.Traversal
@@ -98,3 +101,20 @@ line-copy-obs-demo = line-copy-obs-correct
 line-copy-obs-at-2-demo :
   lookupEnv (run line-initial line-copy-wfk) line-output line-2 ≡ 4
 line-copy-obs-at-2-demo = line-copy-output-at-2
+
+-- Polyhedral model: forward and backward orderings of line-copy are equivalent.
+forward-backward-demo :
+  PostStateEq
+    (runWithSchedule line-initial line-copy-kernel forward-schedule)
+    (runWithSchedule line-initial line-copy-kernel backward-schedule)
+forward-backward-demo = forward-backward-equivalent line-initial
+
+-- Schedule equivalence: any two valid schedules for an OutputInputConsistent
+-- kernel produce the same post-state.
+line-copy-schedule-equiv-demo :
+  (vs1 vs2 : ValidSchedule line-copy-kernel 3) →
+  PostStateEq
+    (runWithSchedule line-initial line-copy-kernel vs1)
+    (runWithSchedule line-initial line-copy-kernel vs2)
+line-copy-schedule-equiv-demo vs1 vs2 =
+  schedule-equivalence line-copy-kernel line-copy-oi-consistent vs1 vs2 line-initial

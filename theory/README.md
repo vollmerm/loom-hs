@@ -88,6 +88,21 @@ The initial mechanization now has a first rectangular+tiled core:
     access discipline + coverage discipline) is observationally equivalent to its `pointwiseSpec`;
     a thin re-packaging of `ExactCoverLinear.runWhole-state-eq` with paper-friendly names, explicit
     discipline documentation, and a concrete 1D example
+- `Loom.Theory.ScheduleIndependent`
+  - defines `ValidSchedule`, the factoring of `ExactCoverKernel` into a base kernel and a
+    traversal schedule; provides `OutputInputConsistent` (the "no carried cross-iteration dependence"
+    condition); includes bridges `toWholeKernel` and `toExactCoverKernel`; proves
+    `OutputInputConsistent` holds for all concrete example kernels (copy and increment, 1D and 2D
+    rect and tiled)
+- `Loom.Theory.ScheduleEquivalence`
+  - **schedule equivalence theorem**: for any `OutputInputConsistent` base kernel, any two valid
+    schedules produce identical post-states; the three-step proof uses `schedule-canonical-output`
+    (per-cell correctness from `ExactCoverLinear`), `schedule-independent-spec` (the key lemma that
+    different schedules write the same value, by `OutputInputConsistent`), and transitivity
+- `Loom.Theory.PolyhedralModel`
+  - **polyhedral model connection**: paper-facing packaging of `schedule-equivalence` as
+    `polyhedral-schedule-invariance`; defines `LegalSchedule` as the Loom analog of a polyhedral-
+    legal schedule; includes a concrete forward-vs-backward ordering corollary for `line-copy-kernel`
 
 ### 2D flattening via `foldFin-product`
 
@@ -149,6 +164,9 @@ The Agda modules deliberately mirror a smaller subset of the Haskell verificatio
 | `StripMineTiling` | rectangular vs tiled exact-cover equivalence | first strip-mining / tiling post-state equivalence theorem |
 | `SchedulePreservation` | schedule-transformation preservation | semantic equality for equivalent exact-cover tiled traversals |
 | `Determinism` | post-state equivalence for disciplined traversals | first paper-facing determinism/race-freedom stepping stone |
+| `ScheduleIndependent` | `ValidSchedule`, `OutputInputConsistent`, bridges | factoring ExactCoverKernel into base + schedule; the "no carried dependence" condition |
+| `ScheduleEquivalence` | **general schedule-equivalence theorem** | any two valid schedules for an `OutputInputConsistent` kernel produce the same post-state |
+| `PolyhedralModel` | **polyhedral model connection** | `polyhedral-schedule-invariance`; `LegalSchedule`; forward-vs-backward concrete corollary |
 | `Reduction` | sequential reducer semantics | proof-friendly model for `foldFor` / `foldFor1D` style reductions |
 | `ReductionTheorems` | first reducer correctness results | explicit summation semantics for `sumReducer` |
 | `Traversal` | first-class traversal enumerators | extraction-friendly traversal descriptors for verified execution order |
@@ -299,6 +317,13 @@ The mechanization now has a clearer proof ladder for a paper-oriented story:
 5. schedule-invariant output preservation for equivalent disciplined traversals (`SchedulePreservation`)
 6. packaged post-state equivalence for those traversals (`Determinism`)
 7. phased rectangular composition over coarse barrier boundaries (`Phase`, `PhaseSemantics`, `PhaseTheorems`)
+8. **polyhedral model core theorem**: all legal schedules for any `OutputInputConsistent` kernel
+   produce identical post-states (`ScheduleIndependent`, `ScheduleEquivalence`, `PolyhedralModel`)
+
+Steps 3–6 are specific instances of step 8.  The `schedule-equivalence` theorem in
+`ScheduleEquivalence` subsumes loop interchange, strip-mine tiling, and schedule preservation
+as corollaries: all three are instances of two valid schedules for an `OutputInputConsistent`
+base kernel.
 
 The `ObservationalEquivalence` module re-packages the generic `ExactCoverLinear.runWhole-state-eq`
 proof under paper-friendly names.  The key concepts it exposes are:
@@ -311,6 +336,16 @@ proof under paper-friendly names.  The key concepts it exposes are:
 | `obs-correct` | `runWhole-state-eq` | the headline observational equivalence |
 | `obs-correct-at` | `runWhole-covered-pointwise` | per-output-cell corollary |
 | `obs-correct-unrelated` | `runWhole-unrelated` | unrelated-array preservation |
+
+The `PolyhedralModel` module re-packages `ScheduleEquivalence.schedule-equivalence` under
+polyhedral-model-facing names:
+
+| Paper name | Agda name | Meaning |
+|---|---|---|
+| `LegalSchedule` | `LegalSchedule` | base + `OutputInputConsistent` + `ValidSchedule` |
+| `polyhedral-schedule-invariance` | `schedule-equivalence` | all legal schedules agree |
+| `OutputInputConsistent` | `OutputInputConsistent` | no cross-iteration RAW/WAW dependence |
+| `ValidSchedule` | `ValidSchedule` | exact-cover execution order |
 
 The current main targets beyond this are to strengthen the affine/transformation story beyond loop
 interchange, to extend the determinism layer into a more explicit race-freedom or disciplined
