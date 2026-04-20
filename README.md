@@ -81,6 +81,16 @@ The library is split into a small front door plus explicit advanced modules.
 | `Loom.Verify` | Verified loop builders with explicit access metadata |
 | `Loom.Verify.Polyhedral` | Bridge helpers between verified descriptions and polyhedral kernels |
 
+## Theory
+
+The repository also includes a `theory/` workspace for the Agda mechanization work behind
+the schedule-typed kernel design. Typecheck the initial Agda project with:
+
+```bash
+cd theory
+make check
+```
+
 ## Building
 
 Build the library, test suite, and benchmark executable with:

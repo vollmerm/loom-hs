@@ -2,15 +2,20 @@
 
 module Loom.Theory.ExactCoverRect2 where
 
+open import Data.Fin.Base using (combine; remQuot)
+open import Data.Fin.Properties using (remQuot-combine)
+open import Data.Nat.Base using (_*_)
 open import Loom.Theory.Access
 open import Loom.Theory.Index
 open import Loom.Theory.Pointwise
 open import Loom.Theory.Prelude
 open import Loom.Theory.RectExecution
+open import Loom.Theory.Schedule
 open import Loom.Theory.Semantics
 open import Loom.Theory.Shape
 open import Loom.Theory.WholeRect2
 open import Relation.Nullary using (no; yes)
+import Loom.Theory.ExactCoverLinear as ExactCoverLinear
 
 record ExactCoverRect2Kernel (rows cols : ℕ) : Set where
   field
@@ -92,3 +97,20 @@ runRect2-state-eq :
     (runRect2 env (kernelProgram (base (wholeKernel kernel))))
     (rect2Expected kernel env)
 runRect2-state-eq kernel env arr ix = runRect2-state kernel env arr ix
+
+-- Bridge: every ExactCoverRect2Kernel is an instance of the generic ExactCoverLinear framework.
+-- coverIndex flattens the (row, col) cover witness to a flat Fin (rows * cols) index.
+toExactCoverKernel :
+  ∀ {rows cols} →
+  ExactCoverRect2Kernel rows cols →
+  ExactCoverLinear.ExactCoverKernel {rank2} {rect} {shape2 rows cols} (rows * cols)
+toExactCoverKernel {rows} {cols} kernel = record
+  { wholeKernel  = toWholeKernel (wholeKernel kernel)
+  ; coverIndex   = λ target → combine (coverRow kernel target) (coverCol kernel target)
+  ; outputCovered = λ target →
+      trans
+        (cong
+          (λ p → resolve (outputAt (base (wholeKernel kernel)) p))
+          (remQuot-combine {n = rows} {k = cols} (coverRow kernel target) (coverCol kernel target)))
+        (outputCovered kernel target)
+  }

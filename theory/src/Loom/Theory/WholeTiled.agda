@@ -13,6 +13,7 @@ open import Loom.Theory.Shape
 open import Loom.Theory.Syntax
 open import Loom.Theory.Traversal using (Enumerator; LinearTraversal; runEnumerator; stepAt; traversal)
 open import Loom.Theory.TiledPointwise
+open import Loom.Theory.WholeLinear using (WholeKernel)
 
 record WholeTiledKernel (n : ℕ) (dom tileShape : Shape rank2) : Set where
   field
@@ -181,3 +182,21 @@ runTiles-input-preserved kernel env j =
     (inputArr (baseKernel kernel))
     (λ eq → distinct (baseKernel kernel) (sym eq))
     j
+
+-- Convert to the generic WholeLinear.WholeKernel.
+-- runTiles env k  =  WholeLinear.runWhole env (toWholeKernel k)  by refl.
+toWholeKernel :
+  ∀ {n dom tileShape} →
+  WholeTiledKernel n dom tileShape →
+  WholeKernel {rank2} {tile tileShape} {dom} n
+toWholeKernel kernel = record
+  { base         = base (baseKernel kernel)
+  ; steps        = steps kernel
+  ; outputUnique =
+      λ {i} {j} eq →
+        outputUnique kernel
+          (trans
+            (sym (output-global (baseKernel kernel) (tileAt kernel i)))
+            (trans eq
+              (output-global (baseKernel kernel) (tileAt kernel j))))
+  }

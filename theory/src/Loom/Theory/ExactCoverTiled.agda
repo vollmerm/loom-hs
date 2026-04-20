@@ -3,9 +3,12 @@
 module Loom.Theory.ExactCoverTiled where
 
 open import Loom.Theory.Access
+open import Loom.Theory.ExactCoverLinear
+  using (ExactCoverKernel; expectedOutput)
 open import Loom.Theory.Index
 open import Loom.Theory.Pointwise
 open import Loom.Theory.Prelude
+open import Loom.Theory.Schedule
 open import Loom.Theory.Semantics
 open import Loom.Theory.Shape
 open import Loom.Theory.TiledPointwise
@@ -22,6 +25,21 @@ record ExactCoverTiledKernel (n : ℕ) (dom tileShape : Shape rank2) : Set where
       outputGlobal (baseKernel wholeKernel) (tileAt wholeKernel (coverIndex target)) ≡ target
 
 open ExactCoverTiledKernel public
+
+-- Convert to the generic ExactCoverLinear.ExactCoverKernel.
+-- output-global bridges outputGlobal → resolve (outputAt ...) in outputCovered.
+toExactCoverKernel :
+  ∀ {n dom tileShape} →
+  ExactCoverTiledKernel n dom tileShape →
+  ExactCoverKernel {rank2} {tile tileShape} {dom} n
+toExactCoverKernel kernel = record
+  { wholeKernel  = toWholeKernel (wholeKernel kernel)
+  ; coverIndex   = coverIndex kernel
+  ; outputCovered = λ target →
+      trans
+        (output-global (baseKernel (wholeKernel kernel)) (tileAt (wholeKernel kernel) (coverIndex kernel target)))
+        (outputCovered kernel target)
+  }
 
 runTiles-covered-pointwise :
   ∀ {n dom tileShape} →

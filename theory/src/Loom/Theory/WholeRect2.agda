@@ -2,6 +2,9 @@
 
 module Loom.Theory.WholeRect2 where
 
+open import Data.Fin.Base using (combine; remQuot)
+open import Data.Fin.Properties using (combine-remQuot)
+open import Data.Nat.Base using (_*_)
 open import Loom.Theory.Access
 open import Loom.Theory.Index
 open import Loom.Theory.Pointwise
@@ -10,6 +13,8 @@ open import Loom.Theory.RectExecution
 open import Loom.Theory.Schedule
 open import Loom.Theory.Semantics
 open import Loom.Theory.Shape
+import Loom.Theory.Traversal as Traversal
+import Loom.Theory.WholeLinear as WholeLinear
 
 record WholeRect2Kernel (rows cols : ℕ) : Set where
   field
@@ -282,3 +287,32 @@ runRect2-input-preserved :
     lookupEnv env (inputArr (base kernel)) j
 runRect2-input-preserved kernel env j =
   runRect2-unrelated kernel env (inputArr (base kernel)) (λ eq → distinct (base kernel) (sym eq)) j
+
+-- Bridge: every WholeRect2Kernel is an instance of the generic WholeLinear framework
+-- via row-major flattening: Fin rows × Fin cols ↔ Fin (rows * cols).
+toWholeKernel :
+  ∀ {rows cols} →
+  WholeRect2Kernel rows cols →
+  WholeLinear.WholeKernel {rank2} {rect} {shape2 rows cols} (rows * cols)
+toWholeKernel {rows} {cols} kernel = record
+  { base  = base kernel
+  ; steps = Traversal.linearTraversal (remQuot cols)
+  ; outputUnique = λ {flat_i} {flat_j} eq →
+      trans
+        (sym (combine-remQuot {n = rows} cols flat_i))
+        (trans
+          (cong (λ p → combine (proj₁ p) (proj₂ p)) (outputUnique kernel eq))
+          (combine-remQuot {n = rows} cols flat_j))
+  }
+
+-- The 2D run equals the generic whole-run: proved by the foldFin-product bijection.
+runRect2-eq-runWhole :
+  ∀ {rows cols} →
+  (k : WholeRect2Kernel rows cols) →
+  (env : Env rank2) →
+  runRect2 env (kernelProgram (base k)) ≡
+  WholeLinear.runWhole env (toWholeKernel k)
+runRect2-eq-runWhole k env =
+  Traversal.foldFin-product
+    (λ row col env' → runAt env' (kernelProgram (base k)) (row , col))
+    env

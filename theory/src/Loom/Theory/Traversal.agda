@@ -2,6 +2,10 @@
 
 module Loom.Theory.Traversal where
 
+open import Data.Fin.Base using (_↑ˡ_; _↑ʳ_; combine; remQuot)
+open import Data.Fin.Properties using (remQuot-combine; combine-remQuot)
+open import Data.Nat.Base using (_*_) renaming (_+_ to _+ℕ_)
+open import Data.Product.Base using (map₁)
 open import Loom.Theory.Index
 open import Loom.Theory.Prelude
 open import Loom.Theory.Schedule
@@ -101,3 +105,65 @@ columnMajor-covers :
   (ix : RectIx (shape2 rows cols)) →
   elemAt columnMajorTraversal2D (colOf ix) (rowOf ix) ≡ ix
 columnMajor-covers ix = refl
+
+-- remQuot of a left-injection is (fzero , i)
+remQuot-↑ˡ : ∀ {m n : ℕ} (i : Fin n) → remQuot n (i ↑ˡ (m * n)) ≡ (fzero , i)
+remQuot-↑ˡ {m} {n} i = remQuot-combine {n = suc m} {k = n} fzero i
+
+-- remQuot of a right-injection bumps the quotient by one
+remQuot-↑ʳ : ∀ {m : ℕ} (n : ℕ) (x : Fin (m * n)) → remQuot n (n ↑ʳ x) ≡ map₁ fsuc (remQuot n x)
+remQuot-↑ʳ {m} n x =
+  trans
+    (cong (λ y → remQuot n (n ↑ʳ y)) (sym (combine-remQuot {n = m} n x)))
+    (remQuot-combine {n = suc m} {k = n} (fsuc (proj₁ (remQuot {m} n x))) (proj₂ (remQuot {m} n x)))
+
+-- foldFin respects pointwise equality of bodies
+foldFin-cong :
+  ∀ {A : Set} {n : ℕ} {f g : Fin n → A → A} →
+  (∀ i acc → f i acc ≡ g i acc) →
+  (init : A) →
+  foldFin f init ≡ foldFin g init
+foldFin-cong {n = zero}  h init = refl
+foldFin-cong {n = suc n} {f = f} {g = g} h init =
+  trans
+    (foldFin-cong (λ i acc → h (fsuc i) acc) (f fzero init))
+    (cong (foldFin (λ i acc → g (fsuc i) acc)) (h fzero init))
+
+-- foldFin over (outer + inner) splits into inner-then-outer passes
+-- Left half: indices i ↑ˡ inner  (first outer steps)
+-- Right half: indices outer ↑ʳ j (last inner steps)
+foldFin-append :
+  ∀ {A : Set} {outer inner : ℕ} →
+  (body : Fin (outer +ℕ inner) → A → A) →
+  (init : A) →
+  foldFin body init ≡
+  foldFin (λ i → body (outer ↑ʳ i)) (foldFin (λ j → body (j ↑ˡ inner)) init)
+foldFin-append {outer = zero}       body init = refl
+foldFin-append {outer = suc outer'} {inner} body init =
+  foldFin-append {outer = outer'} {inner = inner} (λ i → body (fsuc i)) (body fzero init)
+
+-- Nested foldFin over (rows × cols) equals flat foldFin via remQuot
+foldFin-product :
+  ∀ {A : Set} {rows cols : ℕ} →
+  (f : Fin rows → Fin cols → A → A) →
+  (init : A) →
+  foldFin (λ i acc → foldFin (f i) acc) init ≡
+  foldFin (λ flat acc → let (i , j) = remQuot cols flat in f i j acc) init
+foldFin-product {rows = zero}         f init = refl
+foldFin-product {rows = suc rows'} {cols} f init =
+  trans
+    (foldFin-product (λ i → f (fsuc i)) (foldFin (f fzero) init))
+    (sym
+      (trans
+        (foldFin-append {outer = cols} {inner = rows' * cols}
+          (λ flat acc → let (i , j) = remQuot cols flat in f i j acc)
+          init)
+        (trans
+          (cong
+            (foldFin (λ x acc → let (i , j) = remQuot cols (cols ↑ʳ x) in f i j acc))
+            (foldFin-cong
+              (λ j acc → cong (λ p → f (proj₁ p) (proj₂ p) acc) (remQuot-↑ˡ {m = rows'} j))
+              init))
+          (foldFin-cong
+            (λ x acc → cong (λ p → f (proj₁ p) (proj₂ p) acc) (remQuot-↑ʳ {m = rows'} cols x))
+            (foldFin (f fzero) init)))))
