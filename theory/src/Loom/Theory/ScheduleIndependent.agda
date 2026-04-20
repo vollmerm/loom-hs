@@ -37,6 +37,7 @@ open import Loom.Theory.Shape
 open import Loom.Theory.Traversal using (LinearTraversal; stepAt)
 open import Loom.Theory.WholeLinear using (WholeKernel; runWhole)
 import Loom.Theory.ExactCoverLinear as ECL
+open import Function using (id)
 
 -- A valid schedule for a base kernel: packages the traversal, injectivity,
 -- and exact-cover witness.  This is ExactCoverKernel with the base factored out
@@ -133,3 +134,33 @@ tiny-rect-inc-oi-consistent _ _ h = h
 -- coordinate of the tile index, so OutputInputConsistent is equally trivial.
 tiled-copy-oi-consistent : OutputInputConsistent tiled-copy-kernel
 tiled-copy-oi-consistent _ _ h = h
+
+-- GENERAL THEOREM: factoring implies OI-consistency.
+--
+-- If the input-access function factors through the output-access function —
+-- i.e. there is a map f such that resolve(inputAt i) = f(resolve(outputAt i))
+-- for every step index i — then the kernel is OutputInputConsistent.
+--
+-- This is the formal counterpart of the polyhedral model's "input index is an
+-- affine function of the output index" legality condition.  For copy kernels
+-- (identity transform, inputAt = outputAt), f = id and the factoring witness
+-- is λ _ → refl; for a stride-s read, f = (· * s).
+--
+-- Proof: if two steps write to the same output coordinate, the factoring
+-- forces them to also read from the same input coordinate.
+factoring-implies-oi-consistent :
+  ∀ {rank sched dom} →
+  (base : PointwiseKernel {rank} sched dom) →
+  (f : RectIx (shape (outputArr base)) → RectIx (shape (inputArr base))) →
+  (∀ (i : Index sched dom) →
+    resolve (inputAt base i) ≡ f (resolve (outputAt base i))) →
+  OutputInputConsistent base
+factoring-implies-oi-consistent base f factored i j h =
+  trans (factored i) (trans (cong f h) (sym (factored j)))
+
+-- COROLLARY: copy-style kernels (inputAt = outputAt) are OI-consistent via
+-- factoring-implies-oi-consistent with f = id.
+-- Shows that all existing `λ _ _ h → h` proofs are instances of the general theorem.
+line-copy-oi-by-factoring : OutputInputConsistent line-copy-kernel
+line-copy-oi-by-factoring =
+  factoring-implies-oi-consistent line-copy-kernel id (λ _ → refl)

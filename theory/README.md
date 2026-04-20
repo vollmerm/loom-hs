@@ -93,7 +93,10 @@ The initial mechanization now has a first rectangular+tiled core:
     traversal schedule; provides `OutputInputConsistent` (the "no carried cross-iteration dependence"
     condition); includes bridges `toWholeKernel` and `toExactCoverKernel`; proves
     `OutputInputConsistent` holds for all concrete example kernels (copy and increment, 1D and 2D
-    rect and tiled)
+    rect and tiled); adds `factoring-implies-oi-consistent` (if the input-access function factors
+    through the output-access function via some map `f`, then `OutputInputConsistent` holds
+    automatically — the abstract form of the polyhedral "input index is a function of output index"
+    check) and `line-copy-oi-by-factoring` as a concrete corollary via `f = id`
 - `Loom.Theory.ScheduleEquivalence`
   - **schedule equivalence theorem**: for any `OutputInputConsistent` base kernel, any two valid
     schedules produce identical post-states; the three-step proof uses `schedule-canonical-output`
@@ -103,6 +106,14 @@ The initial mechanization now has a first rectangular+tiled core:
   - **polyhedral model connection**: paper-facing packaging of `schedule-equivalence` as
     `polyhedral-schedule-invariance`; defines `LegalSchedule` as the Loom analog of a polyhedral-
     legal schedule; includes a concrete forward-vs-backward ordering corollary for `line-copy-kernel`
+- `Loom.Theory.KernelIndependence`
+  - **kernel independence theorem**: `kernel-independence` proves that two `ExactCoverKernel`
+    instances with disjoint output arrays that do not read from each other's outputs can be run in
+    either order (`runWhole k1` then `runWhole k2`, or `runWhole k2` then `runWhole k1`) and produce
+    the same combined environment; proof uses `runWhole-unrelated` and `runWhole-covered-pointwise`
+    in a three-case analysis on which array is queried; a concrete demo `line-copy-inc-independent`
+    in `Main.agda` shows that `line-exact-kernel` (writes array-6) and `line-inc-exact-kernel`
+    (writes array-7) commute with all three non-overlap hypotheses discharging as `λ ()`
 
 ### 2D flattening via `foldFin-product`
 
@@ -167,6 +178,7 @@ The Agda modules deliberately mirror a smaller subset of the Haskell verificatio
 | `ScheduleIndependent` | `ValidSchedule`, `OutputInputConsistent`, bridges | factoring ExactCoverKernel into base + schedule; the "no carried dependence" condition |
 | `ScheduleEquivalence` | **general schedule-equivalence theorem** | any two valid schedules for an `OutputInputConsistent` kernel produce the same post-state |
 | `PolyhedralModel` | **polyhedral model connection** | `polyhedral-schedule-invariance`; `LegalSchedule`; forward-vs-backward concrete corollary |
+| `KernelIndependence` | **kernel independence theorem** | `kernel-independence`: two kernels with disjoint outputs that don't cross-read commute under `runWhole` composition; the formal basis for parallel composition of independent `parFor` regions |
 | `Reduction` | sequential reducer semantics | proof-friendly model for `foldFor` / `foldFor1D` style reductions |
 | `ReductionTheorems` | first reducer correctness results | explicit summation semantics for `sumReducer` |
 | `Traversal` | first-class traversal enumerators | extraction-friendly traversal descriptors for verified execution order |

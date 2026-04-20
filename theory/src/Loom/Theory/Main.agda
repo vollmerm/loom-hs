@@ -28,6 +28,7 @@ open import Loom.Theory.SchedulePreservation
 open import Loom.Theory.Schedule
 open import Loom.Theory.Semantics
 open import Loom.Theory.Shape
+open import Loom.Theory.KernelIndependence
 open import Loom.Theory.PolyhedralModel
 open import Loom.Theory.ScheduleEquivalence
 open import Loom.Theory.ScheduleIndependent
@@ -118,3 +119,40 @@ line-copy-schedule-equiv-demo :
     (runWithSchedule line-initial line-copy-kernel vs2)
 line-copy-schedule-equiv-demo vs1 vs2 =
   schedule-equivalence line-copy-kernel line-copy-oi-consistent vs1 vs2 line-initial
+
+-- ────────────────────────────────────────────────────────────────────
+-- Affine / factoring OI-consistency demo
+-- (new in this session)
+-- ────────────────────────────────────────────────────────────────────
+
+-- `line-copy-oi-by-factoring` shows that OI-consistency can be derived
+-- automatically when the input-access function factors through the
+-- output-access function via id.  This avoids reasoning about the
+-- pointwise kernel internals by applying the general theorem.
+_ : OutputInputConsistent line-copy-kernel
+_ = line-copy-oi-by-factoring
+
+-- ────────────────────────────────────────────────────────────────────
+-- Kernel independence demo
+-- (new in this session)
+-- ────────────────────────────────────────────────────────────────────
+
+-- `line-exact-kernel` writes to array-6, reads from array-5.
+-- `line-inc-exact-kernel` writes to array-7, reads from array-5.
+-- All three non-overlap hypotheses discharge as λ () since the array
+-- identifiers are distinct by construction.
+line-copy-inc-independent :
+  ∀ (env : Env rank1) →
+  PostStateEq
+    (runWhole (runWhole env (wholeKernel (Loom.Theory.ExactCoverRect1.toExactCoverKernel line-exact-kernel)))
+              (wholeKernel (Loom.Theory.ExactCoverRect1.toExactCoverKernel line-inc-exact-kernel)))
+    (runWhole (runWhole env (wholeKernel (Loom.Theory.ExactCoverRect1.toExactCoverKernel line-inc-exact-kernel)))
+              (wholeKernel (Loom.Theory.ExactCoverRect1.toExactCoverKernel line-exact-kernel)))
+line-copy-inc-independent env =
+  kernel-independence
+    (Loom.Theory.ExactCoverRect1.toExactCoverKernel line-exact-kernel)
+    (Loom.Theory.ExactCoverRect1.toExactCoverKernel line-inc-exact-kernel)
+    (λ ())   -- out-copy (id=6) ≢ out-inc (id=7)
+    (λ ())   -- out-inc  (id=7) ≢ in-copy (id=5)
+    (λ ())   -- out-copy (id=6) ≢ in-inc  (id=5)
+    env
