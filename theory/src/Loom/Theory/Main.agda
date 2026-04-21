@@ -29,6 +29,9 @@ open import Loom.Theory.Schedule
 open import Loom.Theory.Semantics
 open import Loom.Theory.Shape
 open import Loom.Theory.KernelIndependence
+open import Loom.Theory.ParallelSemantics
+open import Loom.Theory.ConfluenceReduction
+open import Function.Base using (_∘_)
 open import Loom.Theory.PolyhedralModel
 open import Loom.Theory.ScheduleEquivalence
 open import Loom.Theory.ScheduleIndependent
@@ -41,6 +44,15 @@ open import Loom.Theory.WholeLinear
 open import Loom.Theory.WholeTiled
 open import Loom.Theory.WholeRect1
 open import Loom.Theory.WholeRect2
+
+-- Tagless / interpreter-composition layer
+open import Loom.Theory.Tagless.Algebra
+open import Loom.Theory.Tagless.Program
+open import Loom.Theory.Tagless.StateInterp
+open import Loom.Theory.Tagless.InterchangeInterp
+open import Loom.Theory.Tagless.AlgSimulation
+open import Loom.Theory.Tagless.InterchangeTheorem
+open import Loom.Theory.Tagless.BridgeToDeep
 
 two : ℕ
 two = suc (suc zero)
@@ -156,3 +168,77 @@ line-copy-inc-independent env =
     (λ ())   -- out-inc  (id=7) ≢ in-copy (id=5)
     (λ ())   -- out-copy (id=6) ≢ in-inc  (id=5)
     env
+
+-- ────────────────────────────────────────────────────────────────────
+-- Parallel semantics demos
+-- ────────────────────────────────────────────────────────────────────
+
+-- parallel-eq-sequential: for line-copy-kernel with forward-schedule,
+-- big-step parallel execution produces the same post-state as sequential.
+line-copy-parallel-eq-sequential-demo :
+  PostStateEq
+    (runParallel line-initial line-copy-kernel forward-schedule)
+    (runWithSchedule line-initial line-copy-kernel forward-schedule)
+line-copy-parallel-eq-sequential-demo arr ix =
+  parallel-eq-sequential line-copy-kernel forward-schedule line-initial arr ix
+
+-- parallel-schedule-invariance: forward and backward parallel executions
+-- produce the same post-state (formal justification for parFor).
+line-copy-parallel-invariance-demo :
+  PostStateEq
+    (runParallel line-initial line-copy-kernel forward-schedule)
+    (runParallel line-initial line-copy-kernel backward-schedule)
+line-copy-parallel-invariance-demo =
+  parallel-schedule-invariance
+    line-copy-kernel
+    line-copy-oi-consistent
+    forward-schedule
+    backward-schedule
+    line-initial
+
+-- ────────────────────────────────────────────────────────────────────
+-- Confluent reduction demos
+-- ────────────────────────────────────────────────────────────────────
+
+-- sumReducer satisfies the comm-assoc condition.
+_ : IsCommAssocReducer sumReducer
+_ = sumReducer-is-comm-assoc
+
+-- For the identity permutation, foldReducer sum is unchanged (trivial sanity check).
+id-perm-3 : PermOn 3
+id-perm-3 = record
+  { fun        = λ i → i
+  ; injective  = λ h → h
+  ; surjective = λ k → k , refl
+  }
+
+-- foldReducer sumReducer on any permuted 3-element array equals the canonical fold.
+sum-perm-demo : (values : Fin 3 → ℕ) →
+  foldReducer sumReducer (values ∘ fun id-perm-3) ≡ foldReducer sumReducer values
+sum-perm-demo values = foldReducer-sum-perm id-perm-3 values
+
+-- ────────────────────────────────────────────────────────────────────
+-- Tagless interpreter-composition demos
+-- ────────────────────────────────────────────────────────────────────
+
+-- copy-prog runs under the sequential row-major interpreter
+_ : StateM rank2 ⊤
+_ = copy-prog (EnvAlg board)
+
+-- copy-prog runs under the column-major interchange interpreter
+_ : StateM rank2 ⊤
+_ = copy-prog (InterchangeAlg board)
+
+-- The tagless bridge: running copy-prog under EnvAlg equals runRect2
+tagless-bridge-demo :
+  ∀ (env : Env rank2) →
+  proj₁ (copy-prog (EnvAlg board) env) ≡ runRect2 env board-rect-copy
+tagless-bridge-demo env = copy-prog-bridge env
+
+-- The main theorem: loop interchange via algebra substitution
+-- Same tagless program, two different algebras, same post-state
+tagless-interchange-demo :
+  ∀ (env : Env rank2) (arr : Array rank2) (ix : RectIx (shape arr)) →
+  lookupEnv (proj₁ (copy-prog (EnvAlg board) env)) arr ix ≡
+  lookupEnv (proj₁ (copy-prog (InterchangeAlg board) env)) arr ix
+tagless-interchange-demo = copy-tagless-interchange
