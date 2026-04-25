@@ -53,6 +53,8 @@ open import Loom.Theory.Tagless.InterchangeInterp
 open import Loom.Theory.Tagless.AlgSimulation
 open import Loom.Theory.Tagless.InterchangeTheorem
 open import Loom.Theory.Tagless.BridgeToDeep
+open import Loom.Theory.Tagless.GeneralInterchange
+open import Loom.Theory.Tagless.ParallelCorrect
 
 two : ℕ
 two = suc (suc zero)
@@ -235,10 +237,46 @@ tagless-bridge-demo :
   proj₁ (copy-prog (EnvAlg board) env) ≡ runRect2 env board-rect-copy
 tagless-bridge-demo env = copy-prog-bridge env
 
--- The main theorem: loop interchange via algebra substitution
+-- The concrete theorem: loop interchange via algebra substitution for copy-prog
 -- Same tagless program, two different algebras, same post-state
 tagless-interchange-demo :
   ∀ (env : Env rank2) (arr : Array rank2) (ix : RectIx (shape arr)) →
   lookupEnv (proj₁ (copy-prog (EnvAlg board) env)) arr ix ≡
   lookupEnv (proj₁ (copy-prog (InterchangeAlg board) env)) arr ix
 tagless-interchange-demo = copy-tagless-interchange
+
+-- The general theorem: interchange holds for ANY ExactCoverRect2Kernel,
+-- connecting it through runTaglessProg to the deep-embedding interchange proof.
+-- This is the key generalization: the result is not specific to copy-prog.
+-- 'WholeRect2Kernel.base' is qualified to disambiguate from the identically
+-- named fields of WholeLinear, WholeRect1, and TiledPointwise.
+tagless-interchange-general-demo :
+  ∀ {rows cols : ℕ}
+  (kernel : ExactCoverRect2Kernel rows cols)
+  (env : Env rank2) →
+  PostStateEq
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              (EnvAlg (shape2 rows cols)) env))
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              (InterchangeAlg (shape2 rows cols)) env))
+tagless-interchange-general-demo kernel env =
+  tagless-interchange-general kernel env
+
+-- The headline parallel-correctness theorem:
+-- tagless sequential execution (under EnvAlg) equals parallel execution under
+-- any valid schedule, for any OutputInputConsistent kernel.
+tagless-parallel-correct-demo :
+  ∀ {rows cols n : ℕ}
+  (kernel : ExactCoverRect2Kernel rows cols) →
+  OutputInputConsistent (WholeRect2Kernel.base (wholeKernel kernel)) →
+  (vs : ValidSchedule (WholeRect2Kernel.base (wholeKernel kernel)) n) →
+  (env : Env rank2) →
+  PostStateEq
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              (EnvAlg (shape2 rows cols)) env))
+    (runParallel env (WholeRect2Kernel.base (wholeKernel kernel)) vs)
+tagless-parallel-correct-demo kernel oi vs env =
+  tagless-parallel-correct kernel oi vs env
