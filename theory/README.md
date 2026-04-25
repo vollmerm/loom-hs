@@ -181,6 +181,11 @@ The Agda modules deliberately mirror a smaller subset of the Haskell verificatio
 | `KernelIndependence` | **kernel independence theorem** | `kernel-independence`: two kernels with disjoint outputs that don't cross-read commute under `runWhole` composition; the formal basis for parallel composition of independent `parFor` regions |
 | `Reduction` | sequential reducer semantics | proof-friendly model for `foldFor` / `foldFor1D` style reductions |
 | `ReductionTheorems` | first reducer correctness results | explicit summation semantics for `sumReducer` |
+| `ConfluenceReduction` | comm+assoc ⟹ `foldReducer` is permutation-invariant | `foldReducer-perm` theorem; underpins `foldFor` correctness |
+| `FoldForCorrect` | **foldFor correctness theorem** | `foldFor-correct`: after running a 1D exact-cover kernel, folding the output = folding the pointwise-spec output |
+| `WavefrontTraversal` | **anti-diagonal enumerator + coverage + injectivity** | `wavefrontEnum r c`; `wavefront-covers` (surjectivity); `wavefront-injective-outer` / `wavefront-injective-inner` (injectivity) — together a bijection proof |
+| `WavefrontPhase` | **phased wavefront = enumerator (definitional)** | `wavefront-is-enumerator`: `runWavefrontPhases ≡ runEnumerator wavefrontEnum` by `refl` |
+| `WavefrontCorrect` | **wavefront pointwise correctness** | `wavefront-correct`, `wavefront-unrelated`, `wavefront-input-preserved`: the three-part whole-program correctness theorem for 2D pointwise kernels under the anti-diagonal schedule |
 | `Traversal` | first-class traversal enumerators | extraction-friendly traversal descriptors for verified execution order |
 | `Phase`, `PhaseSemantics`, `PhaseTheorems` | phased rectangular programs and barrier-style composition | structured phase sequencing corresponding to coarse barrier boundaries |
 | `ProgramTheorems` | program-level correctness facts | whole-body reasoning over verified kernels |
@@ -190,9 +195,9 @@ The Agda modules deliberately mirror a smaller subset of the Haskell verificatio
 | `FullRunTheorems` | pointwise whole-program facts | first full-run results over complete executions |
 
 This is intentionally a correspondence layer rather than a full formal clone of `Loom.Verify`.
-Wavefront, richer reducer effects, and runtime details remain deferred. Barriers are now modeled
+Richer reducer effects and runtime details remain deferred. Barriers are now modeled
 only in a structured way, as separators between whole rectangular phases rather than as arbitrary
-kernel effects.
+kernel effects. The wavefront correctness theorem is now fully mechanized.
 
 ### Current API coverage audit
 
@@ -206,15 +211,16 @@ The current Agda core most directly mirrors these parts of `Loom.Verify`:
 | `readAt`, `writeAt`-style verified array actions | covered as typed kernel primitives | `Syntax`, `Semantics` |
 | `parFor1D`, `parFor2D` | covered via first-class traversal enumerators, sequential whole-program reference execution, exact-cover rectangular state theorems, a first interchange theorem for 2D, and a generic `LinearTraversal`-indexed whole-program correctness layer | `Traversal`, `RectExecution`, `WholeLinear`, `WholeRect1`, `WholeRect2`, `ExactCoverLinear`, `ExactCoverRect1`, `ExactCoverRect2`, `LoopInterchange` |
 | `parForTiled2D` | covered via tiled single-step, whole-program theorems, a generic `LinearTraversal` bridge, and a first strip-mined equivalence result against rectangular execution | `TiledPointwise`, `WholeTiled`, `ExactCoverTiled`, `WholeLinear`, `ExactCoverLinear`, `StripMineTiling`, `Determinism` |
-| `foldFor1D`, reducer story | partially covered by sequential reducer semantics and first proofs | `Reduction`, `ReductionTheorems` |
+| `foldFor1D`, reducer story | covered by sequential reducer semantics, permutation-invariance theorem, and `foldFor-correct` (fold of kernel output = fold of pointwise spec) | `Reduction`, `ReductionTheorems`, `ConfluenceReduction`, `FoldForCorrect` |
 | `parallel` regions separated by `barrier` | partially covered for rectangular kernels via phased-program sequencing over the shared store model | `Phase`, `PhaseSemantics`, `PhaseTheorems` |
+| `parForWavefront2D` | **mechanized**: anti-diagonal exact-cover (`wavefront-covers`), enumerator injectivity (`wavefront-injective-outer`, `wavefront-injective-inner`), definitional equality of phased/enumerator execution (`wavefront-is-enumerator`), and full per-cell pointwise correctness (`wavefront-correct`) | `WavefrontTraversal`, `WavefrontPhase`, `WavefrontCorrect` |
 
 The current Agda theory does **not** yet model these `Loom.Verify` features directly:
 
 | `Loom.Verify` surface | Current status |
 | --- | --- |
 | `shape3`, `rectIx3`, `parFor3D`, `parForTiled3D`, `unIndex3` | not yet modeled |
-| `parForWavefront2D`, `WaveOffset`, `readWaveAt`, `writeWaveAt`, `waveCoordsOf` | intentionally deferred |
+| `parForWavefront2D`, `WaveOffset`, `readWaveAt`, `writeWaveAt`, `waveCoordsOf` | **mechanized**: anti-diagonal enumerator surjectivity, injectivity, and full per-cell pointwise correctness of the wavefront schedule proved in `WavefrontTraversal`, `WavefrontPhase`, and `WavefrontCorrect`; DiagDependent kernel effects (direct anti-diagonal dependence between iterations) remain outside scope |
 | `AccessCtx` as a richer explicit context API | simplified into capability-indexed access witnesses |
 | arbitrary `barrier` placement, nested parallel runtime behavior | still intentionally outside the current sequential reference model |
 | `DVec` and vectorized array helpers | intentionally omitted from the mechanized core |

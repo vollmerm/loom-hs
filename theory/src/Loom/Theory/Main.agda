@@ -55,6 +55,10 @@ open import Loom.Theory.Tagless.InterchangeTheorem
 open import Loom.Theory.Tagless.BridgeToDeep
 open import Loom.Theory.Tagless.GeneralInterchange
 open import Loom.Theory.Tagless.ParallelCorrect
+open import Loom.Theory.FoldForCorrect
+open import Loom.Theory.WavefrontTraversal
+open import Loom.Theory.WavefrontPhase
+open import Loom.Theory.WavefrontCorrect
 
 two : ℕ
 two = suc (suc zero)
@@ -280,3 +284,34 @@ tagless-parallel-correct-demo :
     (runParallel env (WholeRect2Kernel.base (wholeKernel kernel)) vs)
 tagless-parallel-correct-demo kernel oi vs env =
   tagless-parallel-correct kernel oi vs env
+
+-- ────────────────────────────────────────────────────────────────────
+-- Wavefront correctness demos
+-- ────────────────────────────────────────────────────────────────────
+
+-- Type-checks that wavefront-correct is fully inhabited: each output cell
+-- produced by the wavefront enumerator equals the canonical pointwise result.
+_ : ∀ {r c}
+    (kernel : WavefrontKernel r c)
+    (env    : Env rank2)
+    (d      : Fin (diagCount r c))
+    (pos    : Fin (cellCount (toℕ d) r c)) →
+    lookupEnv
+      (runEnumerator env (kernelProgram (WavefrontKernel.base kernel)) (wavefrontEnum r c))
+      (outputArr (WavefrontKernel.base kernel))
+      (resolve (outputAt (WavefrontKernel.base kernel) (elemAt (wavefrontEnum r c) d pos))) ≡
+    transform (WavefrontKernel.base kernel)
+      (lookupEnv env (inputArr (WavefrontKernel.base kernel))
+        (resolve (inputAt (WavefrontKernel.base kernel) (elemAt (wavefrontEnum r c) d pos))))
+_ = wavefront-correct
+
+-- The input array is untouched by the wavefront traversal.
+_ : ∀ {r c}
+    (kernel : WavefrontKernel r c)
+    (env    : Env rank2)
+    (j      : RectIx (shape (inputArr (WavefrontKernel.base kernel)))) →
+    lookupEnv
+      (runEnumerator env (kernelProgram (WavefrontKernel.base kernel)) (wavefrontEnum r c))
+      (inputArr (WavefrontKernel.base kernel)) j ≡
+    lookupEnv env (inputArr (WavefrontKernel.base kernel)) j
+_ = wavefront-input-preserved
