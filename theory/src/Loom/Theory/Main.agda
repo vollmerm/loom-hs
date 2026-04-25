@@ -55,6 +55,7 @@ open import Loom.Theory.Tagless.InterchangeTheorem
 open import Loom.Theory.Tagless.BridgeToDeep
 open import Loom.Theory.Tagless.GeneralInterchange
 open import Loom.Theory.Tagless.ParallelCorrect
+open import Loom.Theory.InterpreterEquivalence
 open import Loom.Theory.FoldForCorrect
 open import Loom.Theory.WavefrontTraversal
 open import Loom.Theory.WavefrontPhase
@@ -315,3 +316,78 @@ _ : ∀ {r c}
       (inputArr (WavefrontKernel.base kernel)) j ≡
     lookupEnv env (inputArr (WavefrontKernel.base kernel)) j
 _ = wavefront-input-preserved
+
+-- ────────────────────────────────────────────────────────────────────
+-- Interpreter Equivalence demos
+-- ────────────────────────────────────────────────────────────────────
+
+-- Headline theorem: for any sound algebra, any OI-consistent kernel, and any
+-- valid schedule, tagless execution under the algebra is observationally
+-- equivalent to parallel execution under the schedule.
+interpreter-equivalence-demo :
+  ∀ {rows cols n : ℕ}
+  (kernel : ExactCoverRect2Kernel rows cols) →
+  OutputInputConsistent (WholeRect2Kernel.base (wholeKernel kernel)) →
+  (vs  : ValidSchedule (WholeRect2Kernel.base (wholeKernel kernel)) n) →
+  (alg : KernelAlg rect (shape2 rows cols) (StateM rank2)) →
+  SoundKernelAlg alg →
+  (env : Env rank2) →
+  PostStateEq
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              alg env))
+    (runParallel env (WholeRect2Kernel.base (wholeKernel kernel)) vs)
+interpreter-equivalence-demo kernel oi vs alg sound env =
+  interpreter-equivalence kernel oi vs alg sound env
+
+-- Corollary 1 demo: sequential (row-major) execution = parallel execution.
+sequential-parallel-demo :
+  ∀ {rows cols n : ℕ}
+  (kernel : ExactCoverRect2Kernel rows cols) →
+  OutputInputConsistent (WholeRect2Kernel.base (wholeKernel kernel)) →
+  (vs  : ValidSchedule (WholeRect2Kernel.base (wholeKernel kernel)) n) →
+  (env : Env rank2) →
+  PostStateEq
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              (EnvAlg (shape2 rows cols)) env))
+    (runParallel env (WholeRect2Kernel.base (wholeKernel kernel)) vs)
+sequential-parallel-demo kernel oi vs env =
+  sequential-parallel-equivalence kernel oi vs env
+
+-- Corollary 2 demo: column-major (interchange) execution = parallel execution.
+interchange-parallel-demo :
+  ∀ {rows cols n : ℕ}
+  (kernel : ExactCoverRect2Kernel rows cols) →
+  OutputInputConsistent (WholeRect2Kernel.base (wholeKernel kernel)) →
+  (vs  : ValidSchedule (WholeRect2Kernel.base (wholeKernel kernel)) n) →
+  (env : Env rank2) →
+  PostStateEq
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              (InterchangeAlg (shape2 rows cols)) env))
+    (runParallel env (WholeRect2Kernel.base (wholeKernel kernel)) vs)
+interchange-parallel-demo kernel oi vs env =
+  interchange-parallel-equivalence kernel oi vs env
+
+-- Corollary 3 demo: any two sound algebras produce the same post-state.
+-- This is the "compositionality" demo — row-major and column-major agree
+-- directly (without going through parallel semantics) as a special case.
+sound-algebras-agree-demo :
+  ∀ {rows cols n : ℕ}
+  (kernel : ExactCoverRect2Kernel rows cols) →
+  OutputInputConsistent (WholeRect2Kernel.base (wholeKernel kernel)) →
+  (vs  : ValidSchedule (WholeRect2Kernel.base (wholeKernel kernel)) n) →
+  (env : Env rank2) →
+  PostStateEq
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              (EnvAlg (shape2 rows cols)) env))
+    (proj₁ (runTaglessProg
+              (kernelProgram (WholeRect2Kernel.base (wholeKernel kernel)))
+              (InterchangeAlg (shape2 rows cols)) env))
+sound-algebras-agree-demo kernel oi vs env =
+  sound-algebras-agree kernel oi vs
+    (EnvAlg (shape2 _ _)) (InterchangeAlg (shape2 _ _))
+    EnvAlg-sound InterchangeAlg-sound
+    env
