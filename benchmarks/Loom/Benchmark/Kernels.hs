@@ -373,12 +373,14 @@ runFill3DBenchmark env =
   BenchmarkNoChecksum
     <$ runProg
       ( parallel $
-          for3 (fill3DLength env) (fill3DLength env) (fill3DLength env) Schedule.identity $ \i j k ->
+          parForSlices n n n $ \i j k ->
             writeArr
               (fill3DOutput env)
-              ((i * fill3DLength env * fill3DLength env) + (j * fill3DLength env) + k)
+              ((i * n * n) + (j * n) + k)
               (i * 1000000 + j * 1000 + k)
       )
+  where
+    n = fill3DLength env
 
 validateFill3DBenchmark :: Fill3DEnv -> BenchmarkRunResult -> IO Int
 validateFill3DBenchmark env BenchmarkNoChecksum =
