@@ -146,10 +146,12 @@ module Loom.Internal.Kernel
   , mulIVec
   , mulI32Vec
   , mulDVec
+  , subDVec
   , sumVec
   , sumIVec
   , sumI32Vec
   , sumDVec
+  , invSqrtDVec
   , newReducer
   , reduce
   , getReducer
@@ -158,6 +160,7 @@ module Loom.Internal.Kernel
   , accumIVecFor
   , accumI32VecFor
   , accumDVecFor
+  , foldSimdFor4
   , newAcc
   , readAcc
   , writeAcc
@@ -1739,6 +1742,37 @@ sumDVec (DVec lo hi) =
       case unpackDoubleX2# sums of
         (# s0#, s1# #) ->
           D# (s0# +## s1#)
+
+{-# INLINE subDVec #-}
+-- | Subtract two 'Double' SIMD vectors elementwise.
+subDVec :: DVec -> DVec -> DVec
+subDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
+  DVec
+    (minusDoubleX2# leftLo rightLo)
+    (minusDoubleX2# leftHi rightHi)
+
+{-# INLINE invSqrtDVec #-}
+-- | Elementwise reciprocal square root of a 'DVec'.
+--
+-- GHC lacks a SIMD sqrt primop, so this unpacks each lane, applies
+-- scalar 'sqrtDouble#', and repacks.
+invSqrtDVec :: DVec -> DVec
+invSqrtDVec (DVec lo hi) =
+  let !(# a0#, a1# #) = unpackDoubleX2# lo
+      !(# b0#, b1# #) = unpackDoubleX2# hi
+      !r0# = 1.0## /## sqrtDouble# a0#
+      !r1# = 1.0## /## sqrtDouble# a1#
+      !r2# = 1.0## /## sqrtDouble# b0#
+      !r3# = 1.0## /## sqrtDouble# b1#
+  in DVec
+       (packDoubleX2# (# r0#, r1# #))
+       (packDoubleX2# (# r2#, r3# #))
+
+{-# INLINE foldSimdFor4 #-}
+-- | Fold over a range of 'DVec'-sized (4-'Double') chunks with a 'DVec'
+-- accumulator.  Equivalent to 'accumDVecFor'.
+foldSimdFor4 :: Int -> DVec -> (DVec -> Int -> Prog DVec) -> Prog DVec
+foldSimdFor4 = accumDVecFor
 
 {-# INLINE broadcastVec #-}
 -- | Broadcast one scalar value across a generic vector.
