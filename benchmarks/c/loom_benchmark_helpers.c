@@ -56,6 +56,10 @@ int32_t *loom_bench_alloc_int32s(size_t count) {
   return (int32_t *)loom_bench_alloc_array(count, sizeof(int32_t));
 }
 
+int64_t *loom_bench_alloc_int64s(size_t count) {
+  return (int64_t *)loom_bench_alloc_array(count, sizeof(int64_t));
+}
+
 double *loom_bench_alloc_doubles(size_t count) {
   return (double *)loom_bench_alloc_array(count, sizeof(double));
 }
@@ -82,6 +86,12 @@ void loom_bench_fill_seeded_int(int *xs, size_t count, int stride, int offset) {
 void loom_bench_fill_seeded_int32(int32_t *xs, size_t count, int stride, int offset) {
   for (size_t i = 0; i < count; ++i) {
     xs[i] = (int32_t)loom_bench_seed_value(i, stride, offset, 257);
+  }
+}
+
+void loom_bench_fill_seeded_int64(int64_t *xs, size_t count, int stride, int offset) {
+  for (size_t i = 0; i < count; ++i) {
+    xs[i] = (int64_t)loom_bench_seed_value(i, stride, offset, 257);
   }
 }
 
@@ -136,6 +146,13 @@ int64_t loom_bench_sample_1d_int32(const int32_t *xs, size_t n) {
   return (int64_t)xs[0] + (int64_t)xs[loom_bench_mid(n)] + (int64_t)xs[n - 1];
 }
 
+int64_t loom_bench_sample_1d_int64(const int64_t *xs, size_t n) {
+  if (n == 0) {
+    return 0;
+  }
+  return xs[0] + xs[loom_bench_mid(n)] + xs[n - 1];
+}
+
 int64_t loom_bench_sample_1d_double(const double *xs, size_t n) {
   if (n == 0) {
     return 0;
@@ -162,6 +179,16 @@ int64_t loom_bench_sample_2d_int32(const int32_t *xs, size_t rows, size_t cols) 
   size_t mid_col = loom_bench_mid(cols);
   return (int64_t)xs[0] + (int64_t)xs[loom_bench_index_2d(mid_row, mid_col, cols)] +
          (int64_t)xs[loom_bench_index_2d(rows - 1, cols - 1, cols)];
+}
+
+int64_t loom_bench_sample_2d_int64(const int64_t *xs, size_t rows, size_t cols) {
+  if (rows == 0 || cols == 0) {
+    return 0;
+  }
+  size_t mid_row = loom_bench_mid(rows);
+  size_t mid_col = loom_bench_mid(cols);
+  return xs[0] + xs[loom_bench_index_2d(mid_row, mid_col, cols)] +
+         xs[loom_bench_index_2d(rows - 1, cols - 1, cols)];
 }
 
 int64_t loom_bench_sample_2d_double(const double *xs, size_t rows, size_t cols) {
@@ -195,6 +222,17 @@ int64_t loom_bench_sample_3d_int32(const int32_t *xs, size_t dim0, size_t dim1, 
   size_t mid2 = loom_bench_mid(dim2);
   return (int64_t)xs[0] + (int64_t)xs[loom_bench_index_3d(mid0, mid1, mid2, dim1, dim2)] +
          (int64_t)xs[loom_bench_index_3d(dim0 - 1, dim1 - 1, dim2 - 1, dim1, dim2)];
+}
+
+int64_t loom_bench_sample_3d_int64(const int64_t *xs, size_t dim0, size_t dim1, size_t dim2) {
+  if (dim0 == 0 || dim1 == 0 || dim2 == 0) {
+    return 0;
+  }
+  size_t mid0 = loom_bench_mid(dim0);
+  size_t mid1 = loom_bench_mid(dim1);
+  size_t mid2 = loom_bench_mid(dim2);
+  return xs[0] + xs[loom_bench_index_3d(mid0, mid1, mid2, dim1, dim2)] +
+         xs[loom_bench_index_3d(dim0 - 1, dim1 - 1, dim2 - 1, dim1, dim2)];
 }
 
 int64_t loom_bench_sample_3d_double(const double *xs, size_t dim0, size_t dim1, size_t dim2) {

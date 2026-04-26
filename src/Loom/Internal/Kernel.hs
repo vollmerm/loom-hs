@@ -505,6 +505,7 @@ instance Loop Kernel where
       _ ->
         pure ()
 
+  {-# INLINE loopParFor #-}
   loopParFor n body = Kernel $ \rt ->
     dispatchLoop rt n $ \workerRt start end ->
       let go !i
@@ -512,6 +513,7 @@ instance Loop Kernel where
             | otherwise = runKernel (body i) workerRt >> go (i + 1)
        in go start
 
+  {-# INLINE loopParFor2# #-}
   loopParFor2# n# m# body = Kernel $ \rt ->
     case n# <=# 0# of
       1# -> pure ()
@@ -523,6 +525,7 @@ instance Loop Kernel where
              in dispatchLoop rt total $ \workerRt start end ->
                   runLinear2D workerRt m# body start end
 
+  {-# INLINE loopParFor3# #-}
   loopParFor3# n# m# p# body = Kernel $ \rt ->
     case n# <=# 0# of
       1# -> pure ()
@@ -2534,6 +2537,7 @@ canRunParallelLoop rt workers =
     && rtWorkerId rt == Nothing
     && workers > 1
 
+{-# INLINE dispatchLoop #-}
 dispatchLoop :: Runtime -> Int -> (Runtime -> Int -> Int -> IO ()) -> IO ()
 dispatchLoop rt total runChunk
   | total <= 0 = pure ()

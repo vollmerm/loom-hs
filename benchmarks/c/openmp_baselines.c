@@ -72,31 +72,31 @@ typedef checksum_t (*validate_fn)(void *env);
 
 typedef struct {
   int n;
-  int *out;
+  int64_t *out;
 } FillEnv;
 
 typedef struct {
   int n;
-  int *out;
+  int64_t *out;
 } Fill3DEnv;
 
 typedef struct {
   int n;
-  int *left;
-  int *right;
-  int *out;
+  int64_t *left;
+  int64_t *right;
+  int64_t *out;
 } BinaryI64Env;
 
 typedef struct {
   int n;
-  int *input;
+  int64_t *input;
   checksum_t value;
 } ReduceI64Env;
 
 typedef struct {
   int n;
-  int *left;
-  int *right;
+  int64_t *left;
+  int64_t *right;
   checksum_t value;
 } DotEnv;
 
@@ -122,9 +122,9 @@ typedef struct {
 
 typedef struct {
   int n;
-  int *left;
-  int *right;
-  int *out;
+  int64_t *left;
+  int64_t *right;
+  int64_t *out;
 } MatrixI64Env;
 
 typedef struct {
@@ -144,15 +144,15 @@ typedef struct {
 typedef struct {
   int rows;
   int cols;
-  int *left;
-  int *right;
-  int *dp;
+  int64_t *left;
+  int64_t *right;
+  int64_t *dp;
 } WavefrontEnv;
 
 typedef struct {
   int n;
-  int *input;
-  int *output;
+  int64_t *input;
+  int64_t *output;
 } ImageEnv;
 
 typedef struct {
@@ -163,17 +163,17 @@ typedef struct {
 
 typedef struct {
   int n;
-  int *input;
-  int *scratch;
-  int *output;
+  int64_t *input;
+  int64_t *scratch;
+  int64_t *output;
 } BlurEnv;
 
 typedef struct {
   int rows;
   int cols;
-  int *left;
-  int *right;
-  int *dp;
+  int64_t *left;
+  int64_t *right;
+  int64_t *dp;
 } LCSEnv;
 
 typedef struct {
@@ -187,9 +187,9 @@ typedef struct {
 
 typedef struct {
   int n;
-  int *left;
-  int *right;
-  int *out;
+  int64_t *left;
+  int64_t *right;
+  int64_t *out;
 } Volume3DMapEnv;
 
 static const benchmark_spec_t benchmark_specs[] = {
@@ -418,14 +418,14 @@ static report_t execute_benchmark(const benchmark_spec_t *spec, int size, int wa
   return report;
 }
 
-static void kernel_fill_i64(int n, int *out) {
+static void kernel_fill_i64(int n, int64_t *out) {
 #pragma omp parallel for schedule(static)
   for (int i = 0; i < n; ++i) {
     out[i] = (int64_t)i * 3 + 1;
   }
 }
 
-static void kernel_fill_3d_i64(int n, int *out) {
+static void kernel_fill_3d_i64(int n, int64_t *out) {
 #pragma omp parallel for collapse(3) schedule(static)
   for (int i = 0; i < n; ++i) {
     for (int j = 0; j < n; ++j) {
@@ -436,14 +436,14 @@ static void kernel_fill_3d_i64(int n, int *out) {
   }
 }
 
-static void kernel_map_i64(int n, const int *left, const int *right, int *out) {
+static void kernel_map_i64(int n, const int64_t *left, const int64_t *right, int64_t *out) {
 #pragma omp parallel for schedule(static)
   for (int i = 0; i < n; ++i) {
     out[i] = left[i] + (2 * right[i]);
   }
 }
 
-static checksum_t kernel_sum_i64(int n, const int *input) {
+static checksum_t kernel_sum_i64(int n, const int64_t *input) {
   checksum_t total = 0;
 #pragma omp parallel for reduction(+ : total) schedule(static)
   for (int i = 0; i < n; ++i) {
@@ -452,7 +452,7 @@ static checksum_t kernel_sum_i64(int n, const int *input) {
   return total;
 }
 
-static checksum_t kernel_dot_i64(int n, const int *left, const int *right) {
+static checksum_t kernel_dot_i64(int n, const int64_t *left, const int64_t *right) {
   checksum_t total = 0;
 #pragma omp parallel for reduction(+ : total) schedule(static)
   for (int i = 0; i < n; ++i) {
@@ -515,7 +515,7 @@ static void kernel_nbody(int n, const double *pos_x, const double *pos_y, const 
   }
 }
 
-static void kernel_matmul_i64(int n, const int *left, const int *right, int *out) {
+static void kernel_matmul_i64(int n, const int64_t *left, const int64_t *right, int64_t *out) {
 #pragma omp parallel for collapse(2) schedule(static)
   for (int i = 0; i < n; ++i) {
     for (int j = 0; j < n; ++j) {
@@ -529,7 +529,7 @@ static void kernel_matmul_i64(int n, const int *left, const int *right, int *out
   }
 }
 
-static void kernel_tiled_matmul_i64(int n, const int *left, const int *right, int *out) {
+static void kernel_tiled_matmul_i64(int n, const int64_t *left, const int64_t *right, int64_t *out) {
   int tile = min_int(32, n);
 #pragma omp parallel for collapse(2) schedule(static)
   for (int row0 = 0; row0 < n; row0 += tile) {
@@ -645,7 +645,7 @@ static void kernel_tiled_matmul_double_vec(int n, const double *left, const doub
   }
 }
 
-static void kernel_wavefront_edit_distance(int rows, int cols, const int *left, const int *right, int *dp) {
+static void kernel_wavefront_edit_distance(int rows, int cols, const int64_t *left, const int64_t *right, int64_t *dp) {
   int table_cols = cols + 1;
 #pragma omp parallel
   {
@@ -676,7 +676,7 @@ static void kernel_wavefront_edit_distance(int rows, int cols, const int *left, 
   }
 }
 
-static void kernel_red_black_stencil(int n, const int *src, int *out) {
+static void kernel_red_black_stencil(int n, const int64_t *src, int64_t *out) {
 #pragma omp parallel
   {
 #pragma omp for collapse(2) schedule(static)
@@ -747,7 +747,7 @@ static int clamp_index(int n, int value) {
   return value;
 }
 
-static void kernel_separable_blur(int n, const int *src, int *tmp, int *out) {
+static void kernel_separable_blur(int n, const int64_t *src, int64_t *tmp, int64_t *out) {
 #pragma omp parallel
   {
 #pragma omp for collapse(2) schedule(static)
@@ -780,7 +780,7 @@ static void prepare_jacobi(void *env) {
   memcpy(state->current, state->input, (size_t)state->n * sizeof(double));
 }
 
-static void kernel_wavefront_lcs(int rows, int cols, const int *left, const int *right, int *dp) {
+static void kernel_wavefront_lcs(int rows, int cols, const int64_t *left, const int64_t *right, int64_t *dp) {
   int table_cols = cols + 1;
 #pragma omp parallel
   {
@@ -831,7 +831,7 @@ static void kernel_jacobi_2d_step(int n, const double *prev, double *next) {
   }
 }
 
-static void kernel_tiled_3d_map(int n, const int *left, const int *right, int *out) {
+static void kernel_tiled_3d_map(int n, const int64_t *left, const int64_t *right, int64_t *out) {
 #pragma omp parallel for collapse(3) schedule(static)
   for (int i = 0; i < n; ++i)
     for (int j = 0; j < n; ++j)
@@ -853,7 +853,7 @@ static void run_wavefront_lcs(void *env) {
 
 static checksum_t validate_wavefront_lcs(void *env) {
   LCSEnv *state = (LCSEnv *)env;
-  return loom_bench_sample_2d_int(state->dp, state->cols + 1, state->cols + 1);
+  return loom_bench_sample_2d_int64(state->dp, state->cols + 1, state->cols + 1);
 }
 
 static void run_jacobi_2d(void *env) {
@@ -879,7 +879,7 @@ static void run_tiled_3d_map(void *env) {
 
 static checksum_t validate_tiled_3d_map(void *env) {
   Volume3DMapEnv *state = (Volume3DMapEnv *)env;
-  return loom_bench_sample_3d_int(state->out, state->n, state->n, state->n);
+  return loom_bench_sample_3d_int64(state->out, state->n, state->n, state->n);
 }
 
 static void run_fill(void *env) {
@@ -889,7 +889,7 @@ static void run_fill(void *env) {
 
 static checksum_t validate_fill(void *env) {
   FillEnv *state = (FillEnv *)env;
-  return loom_bench_sample_1d_int(state->out, state->n);
+  return loom_bench_sample_1d_int64(state->out, state->n);
 }
 
 static void run_fill_3d(void *env) {
@@ -899,7 +899,7 @@ static void run_fill_3d(void *env) {
 
 static checksum_t validate_fill_3d(void *env) {
   Fill3DEnv *state = (Fill3DEnv *)env;
-  return loom_bench_sample_3d_int(state->out, state->n, state->n, state->n);
+  return loom_bench_sample_3d_int64(state->out, state->n, state->n, state->n);
 }
 
 static void run_map(void *env) {
@@ -909,7 +909,7 @@ static void run_map(void *env) {
 
 static checksum_t validate_map(void *env) {
   BinaryI64Env *state = (BinaryI64Env *)env;
-  return loom_bench_sample_1d_int(state->out, state->n);
+  return loom_bench_sample_1d_int64(state->out, state->n);
 }
 
 static void run_sum(void *env) {
@@ -959,7 +959,7 @@ static void run_matmul_i64(void *env) {
 
 static checksum_t validate_matmul_i64(void *env) {
   MatrixI64Env *state = (MatrixI64Env *)env;
-  return loom_bench_sample_2d_int(state->out, state->n, state->n);
+  return loom_bench_sample_2d_int64(state->out, state->n, state->n);
 }
 
 static void run_tiled_matmul_i64(void *env) {
@@ -1014,7 +1014,7 @@ static void run_wavefront(void *env) {
 
 static checksum_t validate_wavefront(void *env) {
   WavefrontEnv *state = (WavefrontEnv *)env;
-  return loom_bench_sample_2d_int(state->dp, state->cols + 1, state->cols + 1);
+  return loom_bench_sample_2d_int64(state->dp, state->cols + 1, state->cols + 1);
 }
 
 static void run_red_black(void *env) {
@@ -1024,7 +1024,7 @@ static void run_red_black(void *env) {
 
 static checksum_t validate_red_black(void *env) {
   ImageEnv *state = (ImageEnv *)env;
-  return loom_bench_sample_2d_int(state->output, state->n, state->n);
+  return loom_bench_sample_2d_int64(state->output, state->n, state->n);
 }
 
 static void run_normalize(void *env) {
@@ -1044,27 +1044,27 @@ static void run_separable_blur(void *env) {
 
 static checksum_t validate_separable_blur(void *env) {
   BlurEnv *state = (BlurEnv *)env;
-  return loom_bench_sample_2d_int(state->output, state->n, state->n);
+  return loom_bench_sample_2d_int64(state->output, state->n, state->n);
 }
 
 static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup, int iterations) {
   switch (spec->kind) {
     case BENCH_FILL: {
-      FillEnv env = {size, loom_bench_alloc_ints((size_t)size)};
+      FillEnv env = {size, loom_bench_alloc_int64s((size_t)size)};
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_fill, validate_fill);
       free(env.out);
       return report;
     }
     case BENCH_FILL_3D: {
-      Fill3DEnv env = {size, loom_bench_alloc_ints((size_t)size * (size_t)size * (size_t)size)};
+      Fill3DEnv env = {size, loom_bench_alloc_int64s((size_t)size * (size_t)size * (size_t)size)};
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_fill_3d, validate_fill_3d);
       free(env.out);
       return report;
     }
     case BENCH_MAP: {
-      BinaryI64Env env = {size, loom_bench_alloc_ints((size_t)size), loom_bench_alloc_ints((size_t)size), loom_bench_alloc_ints((size_t)size)};
-      loom_bench_fill_seeded_int(env.left, (size_t)size, 17, 11);
-      loom_bench_fill_seeded_int(env.right, (size_t)size, 31, 7);
+      BinaryI64Env env = {size, loom_bench_alloc_int64s((size_t)size), loom_bench_alloc_int64s((size_t)size), loom_bench_alloc_int64s((size_t)size)};
+      loom_bench_fill_seeded_int64(env.left, (size_t)size, 17, 11);
+      loom_bench_fill_seeded_int64(env.right, (size_t)size, 31, 7);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_map, validate_map);
       free(env.left);
       free(env.right);
@@ -1072,16 +1072,16 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       return report;
     }
     case BENCH_SUM: {
-      ReduceI64Env env = {size, loom_bench_alloc_ints((size_t)size), 0};
-      loom_bench_fill_seeded_int(env.input, (size_t)size, 17, 11);
+      ReduceI64Env env = {size, loom_bench_alloc_int64s((size_t)size), 0};
+      loom_bench_fill_seeded_int64(env.input, (size_t)size, 17, 11);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_sum, validate_sum);
       free(env.input);
       return report;
     }
     case BENCH_DOT: {
-      DotEnv env = {size, loom_bench_alloc_ints((size_t)size), loom_bench_alloc_ints((size_t)size), 0};
-      loom_bench_fill_seeded_int(env.left, (size_t)size, 17, 11);
-      loom_bench_fill_seeded_int(env.right, (size_t)size, 31, 7);
+      DotEnv env = {size, loom_bench_alloc_int64s((size_t)size), loom_bench_alloc_int64s((size_t)size), 0};
+      loom_bench_fill_seeded_int64(env.left, (size_t)size, 17, 11);
+      loom_bench_fill_seeded_int64(env.right, (size_t)size, 31, 7);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_dot, validate_dot);
       free(env.left);
       free(env.right);
@@ -1132,9 +1132,9 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       return report;
     }
     case BENCH_MATMUL: {
-      MatrixI64Env env = {size, loom_bench_alloc_ints((size_t)size * (size_t)size), loom_bench_alloc_ints((size_t)size * (size_t)size), loom_bench_alloc_ints((size_t)size * (size_t)size)};
-      loom_bench_fill_seeded_int(env.left, (size_t)size * (size_t)size, 17, 11);
-      loom_bench_fill_seeded_int(env.right, (size_t)size * (size_t)size, 31, 7);
+      MatrixI64Env env = {size, loom_bench_alloc_int64s((size_t)size * (size_t)size), loom_bench_alloc_int64s((size_t)size * (size_t)size), loom_bench_alloc_int64s((size_t)size * (size_t)size)};
+      loom_bench_fill_seeded_int64(env.left, (size_t)size * (size_t)size, 17, 11);
+      loom_bench_fill_seeded_int64(env.right, (size_t)size * (size_t)size, 31, 7);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_matmul_i64, validate_matmul_i64);
       free(env.left);
       free(env.right);
@@ -1142,9 +1142,9 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       return report;
     }
     case BENCH_TILED_MATMUL: {
-      MatrixI64Env env = {size, loom_bench_alloc_ints((size_t)size * (size_t)size), loom_bench_alloc_ints((size_t)size * (size_t)size), loom_bench_alloc_ints((size_t)size * (size_t)size)};
-      loom_bench_fill_seeded_int(env.left, (size_t)size * (size_t)size, 17, 11);
-      loom_bench_fill_seeded_int(env.right, (size_t)size * (size_t)size, 31, 7);
+      MatrixI64Env env = {size, loom_bench_alloc_int64s((size_t)size * (size_t)size), loom_bench_alloc_int64s((size_t)size * (size_t)size), loom_bench_alloc_int64s((size_t)size * (size_t)size)};
+      loom_bench_fill_seeded_int64(env.left, (size_t)size * (size_t)size, 17, 11);
+      loom_bench_fill_seeded_int64(env.right, (size_t)size * (size_t)size, 31, 7);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_tiled_matmul_i64, validate_matmul_i64);
       free(env.left);
       free(env.right);
@@ -1215,11 +1215,11 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       WavefrontEnv env;
       env.rows = size;
       env.cols = size;
-      env.left = loom_bench_alloc_ints((size_t)size);
-      env.right = loom_bench_alloc_ints((size_t)size);
-      env.dp = loom_bench_alloc_ints((size_t)(size + 1) * (size_t)(size + 1));
-      loom_bench_fill_seeded_int(env.left, (size_t)size, 17, 11);
-      loom_bench_fill_seeded_int(env.right, (size_t)size, 31, 7);
+      env.left = loom_bench_alloc_int64s((size_t)size);
+      env.right = loom_bench_alloc_int64s((size_t)size);
+      env.dp = loom_bench_alloc_int64s((size_t)(size + 1) * (size_t)(size + 1));
+      loom_bench_fill_seeded_int64(env.left, (size_t)size, 17, 11);
+      loom_bench_fill_seeded_int64(env.right, (size_t)size, 31, 7);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_wavefront, validate_wavefront);
       free(env.left);
       free(env.right);
@@ -1227,8 +1227,8 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       return report;
     }
     case BENCH_RED_BLACK_STENCIL: {
-      ImageEnv env = {size, loom_bench_alloc_ints((size_t)size * (size_t)size), loom_bench_alloc_ints((size_t)size * (size_t)size)};
-      loom_bench_fill_seeded_int(env.input, (size_t)size * (size_t)size, 17, 11);
+      ImageEnv env = {size, loom_bench_alloc_int64s((size_t)size * (size_t)size), loom_bench_alloc_int64s((size_t)size * (size_t)size)};
+      loom_bench_fill_seeded_int64(env.input, (size_t)size * (size_t)size, 17, 11);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_red_black, validate_red_black);
       free(env.input);
       free(env.output);
@@ -1243,8 +1243,8 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       return report;
     }
     case BENCH_SEPARABLE_BLUR: {
-      BlurEnv env = {size, loom_bench_alloc_ints((size_t)size * (size_t)size), loom_bench_alloc_ints((size_t)size * (size_t)size), loom_bench_alloc_ints((size_t)size * (size_t)size)};
-      loom_bench_fill_seeded_int(env.input, (size_t)size * (size_t)size, 17, 11);
+      BlurEnv env = {size, loom_bench_alloc_int64s((size_t)size * (size_t)size), loom_bench_alloc_int64s((size_t)size * (size_t)size), loom_bench_alloc_int64s((size_t)size * (size_t)size)};
+      loom_bench_fill_seeded_int64(env.input, (size_t)size * (size_t)size, 17, 11);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_separable_blur, validate_separable_blur);
       free(env.input);
       free(env.scratch);
@@ -1255,11 +1255,11 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       LCSEnv env;
       env.rows = size;
       env.cols = size;
-      env.left = loom_bench_alloc_ints((size_t)size);
-      env.right = loom_bench_alloc_ints((size_t)size);
-      env.dp = loom_bench_alloc_ints((size_t)(size + 1) * (size_t)(size + 1));
-      loom_bench_fill_seeded_int(env.left, (size_t)size, 17, 11);
-      loom_bench_fill_seeded_int(env.right, (size_t)size, 31, 7);
+      env.left = loom_bench_alloc_int64s((size_t)size);
+      env.right = loom_bench_alloc_int64s((size_t)size);
+      env.dp = loom_bench_alloc_int64s((size_t)(size + 1) * (size_t)(size + 1));
+      loom_bench_fill_seeded_int64(env.left, (size_t)size, 17, 11);
+      loom_bench_fill_seeded_int64(env.right, (size_t)size, 31, 7);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_wavefront_lcs, validate_wavefront_lcs);
       free(env.left);
       free(env.right);
@@ -1288,11 +1288,11 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       size_t cells = (size_t)size * (size_t)size * (size_t)size;
       Volume3DMapEnv env;
       env.n = size;
-      env.left  = loom_bench_alloc_ints(cells);
-      env.right = loom_bench_alloc_ints(cells);
-      env.out   = loom_bench_alloc_ints(cells);
-      loom_bench_fill_seeded_int(env.left,  cells, 17, 11);
-      loom_bench_fill_seeded_int(env.right, cells, 31, 7);
+      env.left  = loom_bench_alloc_int64s(cells);
+      env.right = loom_bench_alloc_int64s(cells);
+      env.out   = loom_bench_alloc_int64s(cells);
+      loom_bench_fill_seeded_int64(env.left,  cells, 17, 11);
+      loom_bench_fill_seeded_int64(env.right, cells, 31, 7);
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_tiled_3d_map, validate_tiled_3d_map);
       free(env.left);
       free(env.right);
