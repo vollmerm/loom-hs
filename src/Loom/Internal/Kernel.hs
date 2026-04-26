@@ -158,6 +158,7 @@ module Loom.Internal.Kernel
   , readAcc
   , writeAcc
   , foldFor
+  , parFoldFor
   , mkReducer
   , mkReducerWith
   , intSum
@@ -429,6 +430,7 @@ class Monad repr => Loop repr where
   loopReadAcc :: Prim a => AccVar a -> repr a
   loopWriteAcc :: Prim a => AccVar a -> a -> repr ()
   loopFoldFor :: Reducer a -> Int -> (Int -> repr a) -> repr a
+  loopParFoldFor :: Reducer a -> Int -> (Int -> repr a) -> repr a
 
 -- | The program type used by Loom kernels.
 --
@@ -635,6 +637,17 @@ instance Loop Kernel where
               let !acc' = reducerStep spec acc x
               go (i + 1) acc'
      in go 0 (reducerInit spec)
+
+  loopParFoldFor (Reducer spec) n body = Kernel $ \rt ->
+    if n <= 0
+      then pure (reducerDone spec (reducerInit spec))
+      else dispatchFold rt n spec $ \workerRt start end ->
+             let go !i !acc
+                   | i >= end = pure acc
+                   | otherwise = do
+                       x <- runKernel (body i) workerRt
+                       go (i + 1) $! reducerStep spec acc x
+              in go start (reducerInit spec)
 
 class VecAccum a where
   accumVecForIO :: Runtime -> Int -> Vec a -> (Vec a -> Int -> IO (Vec a)) -> IO (Vec a)
@@ -2302,6 +2315,21 @@ foldFor :: Reducer a -> Int -> (Int -> Prog a) -> Prog a
 foldFor reducer n body =
   Prog $ \k -> loopFoldFor reducer n (\i -> unProg (body i) pure) >>= k
 
+{-# INLINE parFoldFor #-}
+-- | Parallel version of 'foldFor'.
+--
+-- Splits the range across workers; each worker accumulates its partition into
+-- an unboxed local accumulator, then the partial results are combined with
+-- 'reducerMerge'. This is the preferred path for parallel reductions because
+-- each worker's accumulator can be register-allocated rather than
+-- heap-allocated.
+--
+-- 'parFoldFor' may only be called between parallel phases (i.e. inside a
+-- 'parallel' block but not inside a 'parFor' body).
+parFoldFor :: Reducer a -> Int -> (Int -> Prog a) -> Prog a
+parFoldFor reducer n body =
+  Prog $ \k -> loopParFoldFor reducer n (\i -> unProg (body i) pure) >>= k
+
 {-# INLINE mkReducer #-}
 -- | Build a reducer from an initial state, a step function, and a finalizer.
 mkReducer :: Prim rep => rep -> (rep -> a -> rep) -> (rep -> a) -> Reducer a
@@ -2417,6 +2445,60 @@ dispatchLoop rt total runChunk
       runParallelPhase team total (chunkSizeFor (teamWorkerCount team) total) $ \workerId start end ->
         let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
          in runChunk workerRt start end
+
+-- | Like 'dispatchLoop' but each worker runs a fold that returns a partial
+-- accumulator. After all workers finish, partial results are combined using
+-- 'reducerMerge' and finalised with 'reducerDone'.
+dispatchFold ::
+  Prim rep =>
+  Runtime ->
+  Int ->
+  ReducerSpec rep a ->
+  (Runtime -> Int -> Int -> IO rep) ->
+  IO a
+dispatchFold rt total spec runChunk
+  | total <= 0 = pure (reducerDone spec (reducerInit spec))
+  | otherwise =
+      let !childRt = rt {rtLoopDepth = rtLoopDepth rt + 1}
+       in case rtTeam rt of
+            Just team ->
+              if canRunParallelLoop rt (teamWorkerCount team)
+                then runParallelFold team childRt
+                else do
+                  rep <- runChunk childRt 0 total
+                  pure (reducerDone spec rep)
+            Nothing -> do
+              caps <- getNumCapabilities
+              let !workers = min total (max 1 caps)
+              if canRunParallelLoop rt workers
+                then
+                  withParallelTeam workers $ \team ->
+                    runParallelFold team (childRt {rtTeam = Just team})
+                else do
+                  rep <- runChunk childRt 0 total
+                  pure (reducerDone spec rep)
+  where
+    runParallelFold !team !childRt = do
+      let !workers = teamWorkerCount team
+          !chunkSize = chunkSizeFor workers total
+      partials <- newPrimArray workers
+      let initSlots !i
+            | i >= workers = pure ()
+            | otherwise = do
+                writePrimArray partials i (reducerInit spec)
+                initSlots (i + 1)
+      initSlots 0
+      runParallelPhase team total chunkSize $ \workerId start end -> do
+        let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
+        chunkRep <- runChunk workerRt start end
+        current <- readPrimArray partials workerId
+        writePrimArray partials workerId $! reducerMerge spec current chunkRep
+      let mergeAll !acc !i
+            | i >= workers = pure (reducerDone spec acc)
+            | otherwise = do
+                partial <- readPrimArray partials i
+                mergeAll (reducerMerge spec acc partial) (i + 1)
+      mergeAll (reducerInit spec) 0
 
 runLinear2D ::
   Runtime ->

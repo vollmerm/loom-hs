@@ -1342,55 +1342,53 @@ runRedBlackStencilKernel n src out =
         x <- readArr src idx
         writeArr out idx x
       barrier
-      parFor2 n n $ \i j ->
-        if isInterior n i j && even (i + j)
-          then do
-            center <- readArr out (i * n + j)
-            up <- readArr out ((i - 1) * n + j)
-            down <- readArr out ((i + 1) * n + j)
-            left <- readArr out (i * n + (j - 1))
-            right <- readArr out (i * n + (j + 1))
-            let total = center + up + down + left + right
-            writeArr out (i * n + j) (total `quot` 5)
-          else pure ()
+      parForRect2D (rect2 1 1 (n - 1) (n - 1)) $ \ix ->
+        withIx2 ix $ \i j ->
+          if even (i + j)
+            then do
+              let !base = i * n
+              center <- readArr out (base + j)
+              up     <- readArr out (base - n + j)
+              down   <- readArr out (base + n + j)
+              left   <- readArr out (base + j - 1)
+              right  <- readArr out (base + j + 1)
+              let total = center + up + down + left + right
+              writeArr out (base + j) (total `quot` 5)
+            else pure ()
       barrier
-      parFor2 n n $ \i j ->
-        if isInterior n i j && odd (i + j)
-          then do
-            center <- readArr out (i * n + j)
-            up <- readArr out ((i - 1) * n + j)
-            down <- readArr out ((i + 1) * n + j)
-            left <- readArr out (i * n + (j - 1))
-            right <- readArr out (i * n + (j + 1))
-            let total = center + up + down + left + right
-            writeArr out (i * n + j) (total `quot` 5)
-          else pure ()
+      parForRect2D (rect2 1 1 (n - 1) (n - 1)) $ \ix ->
+        withIx2 ix $ \i j ->
+          if odd (i + j)
+            then do
+              let !base = i * n
+              center <- readArr out (base + j)
+              up     <- readArr out (base - n + j)
+              down   <- readArr out (base + n + j)
+              left   <- readArr out (base + j - 1)
+              right  <- readArr out (base + j + 1)
+              let total = center + up + down + left + right
+              writeArr out (base + j) (total `quot` 5)
+            else pure ()
 
 runThreePhaseNormalizeKernel :: Int -> Arr Double -> Arr Double -> IO ()
 runThreePhaseNormalizeKernel n src out =
   runProg $
-    parallel $
-      newReducer doubleSum $ \sumVar -> do
-        parFor n $ \i -> do
-          x <- readArr src i
-          reduce sumVar x
-        total <- getReducer sumVar
-        barrier
-        let mean = total / fromIntegral n
-        newReducer doubleSum $ \sqVar -> do
-          parFor n $ \i -> do
-            x <- readArr src i
-            let delta = x - mean
-            reduce sqVar (delta * delta)
-          sqTotal <- getReducer sqVar
-          barrier
-          let variance = sqTotal / fromIntegral n
-              invStd
-                | variance <= 0 = 0
-                | otherwise = 1 / sqrt variance
-          parFor n $ \i -> do
-            x <- readArr src i
-            writeArr out i ((x - mean) * invStd)
+    parallel $ do
+      total <- parFoldFor doubleSum n $ \i -> readArr src i
+      barrier
+      let mean = total / fromIntegral n
+      sqTotal <- parFoldFor doubleSum n $ \i -> do
+        x <- readArr src i
+        let delta = x - mean
+        pure (delta * delta)
+      barrier
+      let variance = sqTotal / fromIntegral n
+          invStd
+            | variance <= 0 = 0
+            | otherwise = 1 / sqrt variance
+      parFor n $ \i -> do
+        x <- readArr src i
+        writeArr out i ((x - mean) * invStd)
 
 runSeparableBlurKernel :: Int -> Arr Int -> Arr Int -> IO ()
 runSeparableBlurKernel n src out = do
@@ -1402,20 +1400,24 @@ runSeparableBlurKernelWithScratch n src tmp out =
   runProg $
     parallel $ do
       parFor2 n n $ \i j -> do
-        let jL = clampIndex n (j - 1)
+        let !base = i * n
+            jL = clampIndex n (j - 1)
             jR = clampIndex n (j + 1)
-        left <- readArr src (i * n + jL)
-        center <- readArr src (i * n + j)
-        right <- readArr src (i * n + jR)
-        writeArr tmp (i * n + j) ((left + center + right) `quot` 3)
+        left   <- readArr src (base + jL)
+        center <- readArr src (base + j)
+        right  <- readArr src (base + jR)
+        writeArr tmp (base + j) ((left + center + right) `quot` 3)
       barrier
       parFor2 n n $ \i j -> do
-        let iU = clampIndex n (i - 1)
-            iD = clampIndex n (i + 1)
-        up <- readArr tmp (iU * n + j)
-        center <- readArr tmp (i * n + j)
-        down <- readArr tmp (iD * n + j)
-        writeArr out (i * n + j) ((up + center + down) `quot` 3)
+        let iU     = clampIndex n (i - 1)
+            iD     = clampIndex n (i + 1)
+            !base  = i * n
+            upBase = iU * n
+            dnBase = iD * n
+        up     <- readArr tmp (upBase + j)
+        center <- readArr tmp (base   + j)
+        down   <- readArr tmp (dnBase + j)
+        writeArr out (base + j) ((up + center + down) `quot` 3)
 
 isInterior :: Int -> Int -> Int -> Bool
 isInterior n i j = i > 0 && i + 1 < n && j > 0 && j + 1 < n

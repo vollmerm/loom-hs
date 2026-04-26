@@ -120,6 +120,7 @@ module Loom
   , readAcc
   , writeAcc
   , foldFor
+  , parFoldFor
   , mkReducer
   , mkReducerWith
   , intSum
@@ -154,6 +155,7 @@ import Loom.Internal.Kernel
   , broadcastVec
   , doubleSum
   , foldFor
+  , parFoldFor
   , fromList
   , getReducer
   , int32Sum
