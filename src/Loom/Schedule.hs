@@ -19,6 +19,10 @@ runProg $ parallel $
 
 Start with 'identity' for the default traversal, then add tiling, permutation,
 or an explicit affine schedule when you need it.
+
+Use 'wavefront' for dynamic-programming kernels (edit distance, LCS) that need
+anti-diagonal parallel execution.  Use 'outerParallel' for stencils and
+multi-pass kernels where only the outermost dimension should be parallelised.
 -}
 module Loom.Schedule
   (
@@ -32,6 +36,8 @@ module Loom.Schedule
   , tile3
   , permute
   , interchange
+  , wavefront
+  , outerParallel
     -- * Composition and rendering
   , compose
   , render

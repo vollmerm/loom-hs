@@ -373,7 +373,7 @@ runFill3DBenchmark env =
   BenchmarkNoChecksum
     <$ runProg
       ( parallel $
-          parForSlices n n n $ \i j k ->
+          for3 n n n Schedule.outerParallel $ \i j k ->
             writeArr
               (fill3DOutput env)
               ((i * n * n) + (j * n) + k)
@@ -393,7 +393,7 @@ runMapBenchmark env =
   BenchmarkNoChecksum
     <$ runProg
       ( parallel $
-          parFor (binaryLength env) $ \i -> do
+          for1 (binaryLength env) Schedule.identity $ \i -> do
             x <- readArr (binaryLeft env) i
             y <- readArr (binaryRight env) i
             writeArr (binaryOutput env) i (x + (2 * y))
@@ -753,7 +753,7 @@ runSum env =
   runProg $
     parallel $
       newReducer intSum $ \sumVar -> do
-        parFor (unaryLength env) $ \i -> do
+        for1 (unaryLength env) Schedule.identity $ \i -> do
           x <- readArr (unaryInput env) i
           reduce sumVar x
         getReducer sumVar
@@ -763,7 +763,7 @@ runDot env =
   runProg $
     parallel $
       newReducer intSum $ \sumVar -> do
-        parFor (binaryLength env) $ \i -> do
+        for1 (binaryLength env) Schedule.identity $ \i -> do
           x <- readArr (binaryLeft env) i
           y <- readArr (binaryRight env) i
           reduce sumVar (x * y)
@@ -939,13 +939,11 @@ runNBodyExample posX posY posZ mass
 
 runFill3DExample :: Int -> IO [Int]
 runFill3DExample n = do
-  let loopShape = sh3 n n n
   arr <- newArr (n * n * n)
   runProg $
     parallel $
-      parForSh3 loopShape $ \ix ->
-        withIx3 ix $ \i j k ->
-          writeArr arr (index3 loopShape ix) (i * 100 + j * 10 + k)
+      for3 n n n Schedule.identity $ \i j k ->
+        writeArr arr (i * n * n + j * n + k) (i * 100 + j * 10 + k)
   toList arr
 
 runPolyhedralTiledMatMulExample :: Int -> [Int] -> [Int] -> IO [Int]
@@ -1023,10 +1021,10 @@ runPolyhedralWavefrontEditDistanceExample xs ys = do
   dp <- newArr ((rows + 1) * tableCols)
   runProg $
     parallel $ do
-      parFor (rows + 1) $ \i ->
+      for1 (rows + 1) Schedule.identity $ \i ->
         writeArr dp (i * tableCols) i
       barrier
-      parFor cols $ \j0 ->
+      for1 cols Schedule.identity $ \j0 ->
         let j = j0 + 1
          in writeArr dp j j
       barrier
@@ -1105,9 +1103,8 @@ runDoubleMatMulScalarKernel :: Int -> Arr Double -> Arr Double -> Arr Double -> 
 runDoubleMatMulScalarKernel n left right out =
   runProg $
     parallel $
-      parFor n $ \i ->
-        parFor n $ \j ->
-          writeMatMulScalarCellDouble n left right out i j
+      for2 n n Schedule.outerParallel $ \i j ->
+        writeMatMulScalarCellDouble n left right out i j
 
 runDoubleTiledMatMulScalarKernel :: Int -> Arr Double -> Arr Double -> Arr Double -> IO ()
 runDoubleTiledMatMulScalarKernel n left right out =
@@ -1244,7 +1241,7 @@ copyDoubleArrayKernel :: Int -> Arr Double -> Arr Double -> IO ()
 copyDoubleArrayKernel n src dst =
   runProg $
     parallel $
-      parFor n $ \i -> do
+      for1 n Schedule.identity $ \i -> do
         x <- readArr src i
         writeArr dst i x
 
@@ -1285,7 +1282,7 @@ runNBodyKernel ::
 runNBodyKernel n posX posY posZ mass accX accY accZ =
   runProg $
     parallel $
-      parFor n $ \i -> do
+      for1 n Schedule.identity $ \i -> do
         xi <- readArr posX i
         yi <- readArr posY i
         zi <- readArr posZ i
@@ -1333,6 +1330,52 @@ accumulateNBodyForce posX posY posZ mass xi yi zi (Force3 ax ay az) j = do
         (ax + (dx * scale))
         (ay + (dy * scale))
         (az + (dz * scale))
+    )
+
+-- | SIMD inner step: process 4 source particles at once using 'DVec'.
+--
+-- Reads a 4-wide chunk from each source array, computes per-lane
+-- displacement, distance, and softened inverse-distance, then
+-- horizontally sums the force contributions into the scalar accumulator.
+-- The @xi4@\/@yi4@\/@zi4@\/@eps4@ arguments are pre-broadcast outside
+-- the j-loop so they are not recomputed per iteration.
+--
+-- The per-lane @1\/sqrt@ is implemented via 'invSqrtDVec', which unpacks
+-- each lane, applies 'sqrtDouble#', and repacks.  LLVM's SLP vectoriser
+-- recognises this pattern and emits a vectorised sqrt instruction.
+{-# INLINE accumulateNBodyForceSimd #-}
+accumulateNBodyForceSimd ::
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  Arr Double ->
+  DVec ->
+  DVec ->
+  DVec ->
+  DVec ->
+  Force3 ->
+  Int ->
+  Prog Force3
+accumulateNBodyForceSimd posX posY posZ mass xi4 yi4 zi4 eps4 (Force3 ax ay az) j = do
+  xj4 <- readDVec posX j
+  yj4 <- readDVec posY j
+  zj4 <- readDVec posZ j
+  mj4 <- readDVec mass j
+  let dx4 = subDVec xj4 xi4
+      dy4 = subDVec yj4 yi4
+      dz4 = subDVec zj4 zi4
+      distSq4 =
+        addDVec
+          (addDVec (mulDVec dx4 dx4) (addDVec (mulDVec dy4 dy4) (mulDVec dz4 dz4)))
+          eps4
+      invDist4 = invSqrtDVec distSq4
+      invDist3_4 = mulDVec invDist4 (mulDVec invDist4 invDist4)
+      scale4 = mulDVec mj4 invDist3_4
+  pure
+    ( Force3
+        (ax + sumDVec (mulDVec dx4 scale4))
+        (ay + sumDVec (mulDVec dy4 scale4))
+        (az + sumDVec (mulDVec dz4 scale4))
     )
 
 nbodySoftening :: Double
@@ -1397,39 +1440,38 @@ runWavefrontEditDistanceKernel rows cols left right dp =
   runProg $
     parallel $ do
       let tableCols = cols + 1
-      parFor (rows + 1) $ \i ->
+      for1 (rows + 1) Schedule.identity $ \i ->
         writeArr dp (i * tableCols) i
       barrier
-      parFor cols $ \j0 ->
+      for1 cols Schedule.identity $ \j0 ->
         let j = j0 + 1
          in writeArr dp j j
       barrier
-      parForWavefront2D (sh2 rows cols) $ \ix ->
-        withIx2 ix $ \i0 j0 -> do
-          let i = i0 + 1
-              j = j0 + 1
-              rowBase = i * tableCols
-              prevRowBase = (i - 1) * tableCols
-          deletion <- readArr dp (prevRowBase + j)
-          insertion <- readArr dp (rowBase + (j - 1))
-          substitution <- readArr dp (prevRowBase + (j - 1))
-          x <- readArr left i0
-          y <- readArr right j0
-          let cost
-                | x == y = 0
-                | otherwise = 1
-              !cell =
-                min3
-                  (deletion + 1)
-                  (insertion + 1)
-                  (substitution + cost)
-          writeArr dp (rowBase + j) cell
+      for2 rows cols Schedule.wavefront $ \i0 j0 -> do
+        let i = i0 + 1
+            j = j0 + 1
+            rowBase = i * tableCols
+            prevRowBase = (i - 1) * tableCols
+        deletion <- readArr dp (prevRowBase + j)
+        insertion <- readArr dp (rowBase + (j - 1))
+        substitution <- readArr dp (prevRowBase + (j - 1))
+        x <- readArr left i0
+        y <- readArr right j0
+        let cost
+              | x == y = 0
+              | otherwise = 1
+            !cell =
+              min3
+                (deletion + 1)
+                (insertion + 1)
+                (substitution + cost)
+        writeArr dp (rowBase + j) cell
 
 runRedBlackStencilKernel :: Int -> Arr Int -> Arr Int -> IO ()
 runRedBlackStencilKernel n src out =
   runProg $
     parallel $ do
-      parFor (n * n) $ \idx -> do
+      for1 (n * n) Schedule.identity $ \idx -> do
         x <- readArr src idx
         writeArr out idx x
       barrier
@@ -1467,7 +1509,7 @@ runThreePhaseNormalizeKernel n src out =
           invStd
             | variance <= 0 = 0
             | otherwise = 1 / sqrt variance
-      parFor n $ \i -> do
+      for1 n Schedule.identity $ \i -> do
         x <- readArr src i
         writeArr out i ((x - mean) * invStd)
 
@@ -1480,7 +1522,7 @@ runSeparableBlurKernelWithScratch :: Int -> Arr Int -> Arr Int -> Arr Int -> IO 
 runSeparableBlurKernelWithScratch n src tmp out =
   runProg $
     parallel $ do
-      parForRows n n $ \i j -> do
+      for2 n n Schedule.outerParallel $ \i j -> do
         let !base = i * n
             jL = clampIndex n (j - 1)
             jR = clampIndex n (j + 1)
@@ -1489,7 +1531,7 @@ runSeparableBlurKernelWithScratch n src tmp out =
         right  <- readArr src (base + jR)
         writeArr tmp (base + j) ((left + center + right) `quot` 3)
       barrier
-      parForRows n n $ \i j -> do
+      for2 n n Schedule.outerParallel $ \i j -> do
         let iU     = clampIndex n (i - 1)
             iD     = clampIndex n (i + 1)
             !base  = i * n
@@ -1588,36 +1630,37 @@ runWavefrontLCSKernel rows cols left right dp =
   runProg $
     parallel $ do
       let tableCols = cols + 1
-      parFor (rows + 1) $ \i ->
+      for1 (rows + 1) Schedule.identity $ \i ->
         writeArr dp (i * tableCols) 0
       barrier
-      parFor cols $ \j0 ->
+      for1 cols Schedule.identity $ \j0 ->
         let j = j0 + 1
          in writeArr dp j 0
       barrier
-      parForWavefront2D (sh2 rows cols) $ \ix ->
-        withIx2 ix $ \i0 j0 -> do
-          let i = i0 + 1
-              j = j0 + 1
-              rowBase = i * tableCols
-              prevRowBase = (i - 1) * tableCols
-          x <- readArr left i0
-          y <- readArr right j0
-          if x == y
-            then do
-              diag <- readArr dp (prevRowBase + (j - 1))
-              writeArr dp (rowBase + j) (diag + 1)
-            else do
-              fromUp   <- readArr dp (prevRowBase + j)
-              fromLeft <- readArr dp (rowBase + (j - 1))
-              writeArr dp (rowBase + j) (max fromUp fromLeft)
+      for2 rows cols Schedule.wavefront $ \i0 j0 -> do
+        let i = i0 + 1
+            j = j0 + 1
+            rowBase = i * tableCols
+            prevRowBase = (i - 1) * tableCols
+        x <- readArr left i0
+        y <- readArr right j0
+        if x == y
+          then do
+            diag <- readArr dp (prevRowBase + (j - 1))
+            writeArr dp (rowBase + j) (diag + 1)
+          else do
+            fromUp   <- readArr dp (prevRowBase + j)
+            fromLeft <- readArr dp (rowBase + (j - 1))
+            writeArr dp (rowBase + j) (max fromUp fromLeft)
 
 runJacobi2DStepKernel :: Int -> Arr Double -> Arr Double -> IO ()
 runJacobi2DStepKernel n prev next =
   runProg $
     parallel $
-      parForRowsRect2D (rect2 1 1 (n - 1) (n - 1)) $ \i j -> do
-        let idx = i * n + j
+      for2 (n - 2) (n - 2) Schedule.outerParallel $ \i0 j0 -> do
+        let i = i0 + 1
+            j = j0 + 1
+            idx = i * n + j
         center <- readArr prev idx
         up    <- readArr prev (idx - n)
         down  <- readArr prev (idx + n)
@@ -1629,7 +1672,7 @@ runTiled3DMapKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
 runTiled3DMapKernel n left right out =
   runProg $
     parallel $
-      parForSlices n n n $ \i j k -> do
+      for3 n n n Schedule.outerParallel $ \i j k -> do
         let idx = i * n * n + j * n + k
         x <- readArr left idx
         y <- readArr right idx

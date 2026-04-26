@@ -98,6 +98,7 @@ module Loom
   , addIVec
   , addI32Vec
   , addDVec
+  , subDVec
   , mulVec
   , mulIVec
   , mulI32Vec
@@ -106,6 +107,7 @@ module Loom
   , sumIVec
   , sumI32Vec
   , sumDVec
+  , invSqrtDVec
 
     -- * Reductions and accumulators
   , newReducer
@@ -116,6 +118,7 @@ module Loom
   , accumIVecFor
   , accumI32VecFor
   , accumDVecFor
+  , foldSimdFor4
   , newAcc
   , readAcc
   , writeAcc
@@ -145,6 +148,7 @@ import Loom.Internal.Kernel
   , accumIVecFor
   , accumVecFor
   , addDVec
+  , subDVec
   , addI32Vec
   , addIVec
   , addVec
@@ -156,11 +160,13 @@ import Loom.Internal.Kernel
   , doubleSum
   , foldFor
   , parFoldFor
+  , foldSimdFor4
   , fromList
   , getReducer
   , int32Sum
   , intSum
   , indexN
+  , invSqrtDVec
   , ixN
   , newAcc
   , newArr
@@ -168,9 +174,12 @@ import Loom.Internal.Kernel
   , parFor
   , parFor2
   , parFor3
+  , parForRows
   , parForScheduleN
   , parForShN
+  , parForSlices
   , parForTransform2D
+  , parForWavefront2D
   , parallel
   , readAcc
   , readArr
@@ -283,17 +292,23 @@ forEach (Domain dims maybeSchedule) body =
     ([depth, rows, cols], Nothing) ->
       parFor3 depth rows cols (\i j k -> body (index3 i j k))
     ([rows, cols], Just schedule) ->
-      case InternalSchedule.compileSchedule2D schedule of
-        Just transform ->
-          parForTransform2D transform (sh2 rows cols) (\ix -> withIx2 ix (\i j -> body (index2 i j)))
-        Nothing ->
-          parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
+      if InternalSchedule.isWavefrontSchedule schedule
+        then parForWavefront2D (sh2 rows cols) (\ix -> withIx2 ix (\i j -> body (index2 i j)))
+        else if InternalSchedule.isOuterParallelSchedule schedule
+          then parForRows rows cols (\i j -> body (index2 i j))
+          else case InternalSchedule.compileSchedule2D schedule of
+            Just transform ->
+              parForTransform2D transform (sh2 rows cols) (\ix -> withIx2 ix (\i j -> body (index2 i j)))
+            Nothing ->
+              parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
     ([depth, rows, cols], Just schedule) ->
-      case InternalSchedule.tileSchedule3D schedule of
-        Just (tileDepth, tileRows, tileCols) ->
-          tiledFor3D tileDepth tileRows tileCols (sh3 depth rows cols) (\i j k -> body (index3 i j k))
-        Nothing ->
-          parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
+      if InternalSchedule.isOuterParallelSchedule schedule
+        then parForSlices depth rows cols (\i j k -> body (index3 i j k))
+        else case InternalSchedule.tileSchedule3D schedule of
+          Just (tileDepth, tileRows, tileCols) ->
+            tiledFor3D tileDepth tileRows tileCols (sh3 depth rows cols) (\i j k -> body (index3 i j k))
+          Nothing ->
+            parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
     (_, Just schedule) ->
       parForScheduleN (InternalSchedule.lowerScheduleN schedule) (shN dims) body
     _ ->
@@ -326,13 +341,17 @@ for2 :: Int -> Int -> Schedule -> (Int -> Int -> Prog ()) -> Prog ()
 for2 rows cols schedule body =
   if InternalSchedule.isIdentitySchedule schedule
     then parFor2 rows cols body
-    else
-      case InternalSchedule.compileSchedule2D schedule of
-        Just transform ->
-          parForTransform2D transform (sh2 rows cols) (\ix -> withIx2 ix body)
-        Nothing ->
-          forScheduled [rows, cols] schedule $ \ix ->
-            withIndex2 "for2" ix body
+    else if InternalSchedule.isWavefrontSchedule schedule
+      then parForWavefront2D (sh2 rows cols) (\ix -> withIx2 ix body)
+      else if InternalSchedule.isOuterParallelSchedule schedule
+        then parForRows rows cols body
+        else
+          case InternalSchedule.compileSchedule2D schedule of
+            Just transform ->
+              parForTransform2D transform (sh2 rows cols) (\ix -> withIx2 ix body)
+            Nothing ->
+              forScheduled [rows, cols] schedule $ \ix ->
+                withIndex2 "for2" ix body
 {-# INLINE for2 #-}
 
 -- | Run a three-dimensional parallel loop with an explicit schedule.
@@ -344,13 +363,15 @@ for3 :: Int -> Int -> Int -> Schedule -> (Int -> Int -> Int -> Prog ()) -> Prog 
 for3 depth rows cols schedule body =
   if InternalSchedule.isIdentitySchedule schedule
     then parFor3 depth rows cols body
-    else
-      case InternalSchedule.tileSchedule3D schedule of
-        Just (tileDepth, tileRows, tileCols) ->
-          tiledFor3D tileDepth tileRows tileCols (sh3 depth rows cols) body
-        Nothing ->
-          forScheduled [depth, rows, cols] schedule $ \ix ->
-            withIndex3 "for3" ix body
+    else if InternalSchedule.isOuterParallelSchedule schedule
+      then parForSlices depth rows cols body
+      else
+        case InternalSchedule.tileSchedule3D schedule of
+          Just (tileDepth, tileRows, tileCols) ->
+            tiledFor3D tileDepth tileRows tileCols (sh3 depth rows cols) body
+          Nothing ->
+            forScheduled [depth, rows, cols] schedule $ \ix ->
+              withIndex3 "for3" ix body
 {-# INLINE for3 #-}
 
 -- | Return the coordinates stored in an 'Index'.
