@@ -21,4 +21,5 @@ cabal.project.local
 cabal.project.local~
 .HTF/
 .ghc.environment.*
-
+benchmarks/c/loom-openmp-baselines
+benchmarks/c/*.o

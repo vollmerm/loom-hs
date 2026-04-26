@@ -3,7 +3,7 @@ module Loom.Benchmark.Harness
   ) where
 
 import Control.Exception (evaluate)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, replicateM, when)
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
@@ -98,14 +98,21 @@ resolveBenchmark cfg = do
   Right (benchmark, size)
 
 runSelected :: Config -> Benchmark -> Int -> IO ()
-runSelected cfg (Benchmark name description _ setup run) size = do
+runSelected cfg (Benchmark name description _ setup prepare run validate) size = do
   env <- setup size
-  warmupChecksums <- sequence (replicate (cfgWarmup cfg) (run env))
+  warmupChecksums <- replicateM (cfgWarmup cfg) $ do
+    prepare env
+    result <- run env
+    validate env result
   let warmupChecksum =
         case reverse warmupChecksums of
           checksum : _ -> Just checksum
           [] -> Nothing
-  results <- sequence (replicate (cfgIterations cfg) (timeAction (run env)))
+  results <- replicateM (cfgIterations cfg) $ do
+    prepare env
+    (timing, result) <- timeAction (run env)
+    checksum <- validate env result
+    pure (timing, checksum)
   let timings = map fst results
       checksums = map snd results
   assertStableChecksums checksums
@@ -126,7 +133,7 @@ runSelected cfg (Benchmark name description _ setup run) size = do
   putStrLn ("min-ms=" <> renderMillis (minimum timings))
   putStrLn ("max-ms=" <> renderMillis (maximum timings))
 
-timeAction :: IO Int -> IO (Word64, Int)
+timeAction :: IO a -> IO (Word64, a)
 timeAction action = do
   start <- getMonotonicTimeNSec
   checksum <- action >>= evaluate

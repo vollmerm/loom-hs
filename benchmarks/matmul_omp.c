@@ -1,8 +1,13 @@
-#include <math.h>
-#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+#include "c/loom_benchmark_helpers.h"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 typedef enum {
   BENCH_NON_TILED,
@@ -80,27 +85,6 @@ static config_t parse_args(int argc, char **argv) {
   return cfg;
 }
 
-static double *alloc_doubles(size_t count) {
-  void *ptr = NULL;
-  if (posix_memalign(&ptr, 64, count * sizeof(double)) != 0) {
-    fprintf(stderr, "failed to allocate %zu doubles\n", count);
-    exit(1);
-  }
-  return (double *)ptr;
-}
-
-static void fill_seeded(double *xs, size_t count, int stride, int offset) {
-  for (size_t i = 0; i < count; ++i) {
-    xs[i] = (double)(((long long)i * stride + offset) % 257) / 257.0;
-  }
-}
-
-static int checksum_matrix(const double *xs, int n) {
-  int mid = n / 2;
-  double total = xs[0] + xs[mid * n + mid] + xs[n * n - 1];
-  return (int)llround(total * 1000.0);
-}
-
 static void matmul_non_tiled(int n, const double *restrict left,
                              const double *restrict right,
                              double *restrict out) {
@@ -138,54 +122,57 @@ static void matmul_tiled(int n, int tile, const double *restrict left,
   }
 }
 
-static int run_once(const config_t *cfg, const double *left, const double *right,
-                    double *out) {
+static void run_once(const config_t *cfg, const double *left, const double *right,
+                     double *out) {
   if (cfg->kind == BENCH_NON_TILED) {
     matmul_non_tiled(cfg->size, left, right, out);
   } else {
     matmul_tiled(cfg->size, cfg->tile, left, right, out);
   }
-  return checksum_matrix(out, cfg->size);
 }
 
 int main(int argc, char **argv) {
   config_t cfg = parse_args(argc, argv);
   size_t elems = (size_t)cfg.size * (size_t)cfg.size;
-  double *left = alloc_doubles(elems);
-  double *right = alloc_doubles(elems);
-  double *out = alloc_doubles(elems);
+  double *left = loom_bench_alloc_doubles(elems);
+  double *right = loom_bench_alloc_doubles(elems);
+  double *out = loom_bench_alloc_doubles(elems);
 
-  fill_seeded(left, elems, 17, 11);
-  fill_seeded(right, elems, 31, 7);
+  loom_bench_fill_seeded_double(left, elems, 17, 11);
+  loom_bench_fill_seeded_double(right, elems, 31, 7);
 
-  int warmup_checksum = 0;
+  int64_t warmup_checksum = 0;
   for (int i = 0; i < cfg.warmup; ++i) {
-    warmup_checksum = run_once(&cfg, left, right, out);
+    run_once(&cfg, left, right, out);
+    warmup_checksum = loom_bench_sample_2d_double(out, (size_t)cfg.size, (size_t)cfg.size);
   }
 
   double total_ms = 0.0;
   double min_ms = 0.0;
   double max_ms = 0.0;
-  int checksum = 0;
+  loom_bench_checksum_state state;
+  loom_bench_checksum_state_init(&state);
 
   for (int i = 0; i < cfg.iterations; ++i) {
-    double start = omp_get_wtime();
-    int current = run_once(&cfg, left, right, out);
-    double end = omp_get_wtime();
+    double start = loom_bench_now_seconds();
+    run_once(&cfg, left, right, out);
+    double end = loom_bench_now_seconds();
+    int64_t current = loom_bench_sample_2d_double(out, (size_t)cfg.size, (size_t)cfg.size);
     double elapsed_ms = (end - start) * 1000.0;
 
     if (i == 0) {
-      checksum = current;
       min_ms = elapsed_ms;
       max_ms = elapsed_ms;
-    } else if (current != checksum) {
-      fprintf(stderr, "checksum changed across iterations: expected %d got %d\n",
-              checksum, current);
-      free(left);
-      free(right);
-      free(out);
+    }
+
+    if (!loom_bench_checksum_state_update(&state, current)) {
+      fprintf(stderr, "checksum changed across iterations: expected %lld got %lld\n",
+              (long long)state.expected, (long long)current);
+      loom_bench_free(left);
+      loom_bench_free(right);
+      loom_bench_free(out);
       return 1;
-    } else {
+    } else if (i > 0) {
       if (elapsed_ms < min_ms) min_ms = elapsed_ms;
       if (elapsed_ms > max_ms) max_ms = elapsed_ms;
     }
@@ -197,16 +184,22 @@ int main(int argc, char **argv) {
   printf("size=%d\n", cfg.size);
   printf("warmup=%d\n", cfg.warmup);
   printf("iterations=%d\n", cfg.iterations);
-  printf("threads=%d\n", omp_get_max_threads());
-  printf("warmup-checksum=%d\n", warmup_checksum);
-  printf("checksum=%d\n", checksum);
+  printf("threads=%d\n",
+#ifdef _OPENMP
+         omp_get_max_threads()
+#else
+         1
+#endif
+  );
+  printf("warmup-checksum=%lld\n", (long long)warmup_checksum);
+  printf("checksum=%lld\n", (long long)state.expected);
   printf("total-ms=%.3f ms\n", total_ms);
   printf("avg-ms=%.3f ms\n", total_ms / (double)cfg.iterations);
   printf("min-ms=%.3f ms\n", min_ms);
   printf("max-ms=%.3f ms\n", max_ms);
 
-  free(left);
-  free(right);
-  free(out);
+  loom_bench_free(left);
+  loom_bench_free(right);
+  loom_bench_free(out);
   return 0;
 }

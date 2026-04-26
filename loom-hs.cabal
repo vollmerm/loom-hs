@@ -51,6 +51,9 @@ extra-doc-files:    CHANGELOG.md
 
 extra-source-files:
     benchmarks/dump-core.sh
+    benchmarks/matmul_omp.c
+    benchmarks/c/loom_benchmark_helpers.c
+    benchmarks/c/loom_benchmark_helpers.h
 
 -- Extra source files to be distributed with the package, such as examples, or a tutorial module.
 -- extra-source-files:

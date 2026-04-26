@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE GADTs #-}
 
 module Loom.Benchmark.Kernels
   ( Benchmark (..)
@@ -37,7 +38,23 @@ data Benchmark = forall env. Benchmark
   , benchmarkDescription :: String
   , benchmarkDefaultSize :: Int
   , benchmarkSetup :: Int -> IO env
-  , benchmarkRun :: env -> IO Int
+  , benchmarkPrepare :: env -> IO ()
+  , benchmarkRun :: env -> IO BenchmarkRunResult
+  , benchmarkValidate :: env -> BenchmarkRunResult -> IO Int
+  }
+
+data BenchmarkRunResult
+  = BenchmarkNoChecksum
+  | BenchmarkChecksum !Int
+
+data FillEnv = FillEnv
+  { fillLength :: !Int
+  , fillOutput :: !(Arr Int)
+  }
+
+data Fill3DEnv = Fill3DEnv
+  { fill3DLength :: !Int
+  , fill3DOutput :: !(Arr Int)
   }
 
 data UnaryEnv = UnaryEnv
@@ -49,28 +66,35 @@ data BinaryEnv = BinaryEnv
   { binaryLength :: !Int
   , binaryLeft :: !(Arr Int)
   , binaryRight :: !(Arr Int)
+  , binaryOutput :: !(Arr Int)
   }
 
 data MatrixEnv = MatrixEnv
   { matrixDim :: !Int
   , matrixLeft :: !(Arr Int)
   , matrixRight :: !(Arr Int)
+  , matrixOutput :: !(Arr Int)
   }
 
 data ImageEnv = ImageEnv
   { imageDim :: !Int
   , imageInput :: !(Arr Int)
+  , imageOutput :: !(Arr Int)
+  , imageScratch :: !(Arr Int)
   }
 
 data DoubleUnaryEnv = DoubleUnaryEnv
   { doubleLength :: !Int
   , doubleInput :: !(Arr Double)
+  , doubleOutput :: !(Arr Double)
   }
 
 data JacobiEnv = JacobiEnv
   { jacobiLength :: !Int
   , jacobiSteps :: !Int
   , jacobiInput :: !(Arr Double)
+  , jacobiCurrent :: !(Arr Double)
+  , jacobiScratch :: !(Arr Double)
   }
 
 data NBodyEnv = NBodyEnv
@@ -79,18 +103,23 @@ data NBodyEnv = NBodyEnv
   , nbodyPosY :: !(Arr Double)
   , nbodyPosZ :: !(Arr Double)
   , nbodyMass :: !(Arr Double)
+  , nbodyAccX :: !(Arr Double)
+  , nbodyAccY :: !(Arr Double)
+  , nbodyAccZ :: !(Arr Double)
   }
 
 data DoubleMatrixEnv = DoubleMatrixEnv
   { doubleMatrixDim :: !Int
   , doubleMatrixLeft :: !(Arr Double)
   , doubleMatrixRight :: !(Arr Double)
+  , doubleMatrixOutput :: !(Arr Double)
   }
 
 data Int32MatrixEnv = Int32MatrixEnv
   { int32MatrixDim :: !Int
   , int32MatrixLeft :: !(Arr Int32)
   , int32MatrixRight :: !(Arr Int32)
+  , int32MatrixOutput :: !(Arr Int32)
   }
 
 data EditDistanceEnv = EditDistanceEnv
@@ -98,6 +127,7 @@ data EditDistanceEnv = EditDistanceEnv
   , editCols :: !Int
   , editLeft :: !(Arr Int)
   , editRight :: !(Arr Int)
+  , editDp :: !(Arr Int)
   }
 
 data Force3 =
@@ -108,26 +138,26 @@ data Force3 =
 
 benchmarks :: [Benchmark]
 benchmarks =
-  [ Benchmark "fill" "parallel 1D fill into a fresh array" 1000000 setupFill runFill
-  , Benchmark "fill-3d" "parallel 3D fill into a fresh volume" 128 setupFill runFill3D
-  , Benchmark "map" "parallel 1D elementwise map over two inputs" 1000000 setupBinaryVector runMap
-  , Benchmark "sum" "parallel reduction over one vector" 1000000 setupUnaryVector runSum
-  , Benchmark "dot" "parallel dot product over two vectors" 1000000 setupBinaryVector runDot
-  , Benchmark "jacobi-1d" "vectorized 1D Jacobi / heat-diffusion timesteps with double buffering" 262144 setupJacobi1D runJacobi1D
-  , Benchmark "verified-jacobi-1d" "vectorized 1D Jacobi via Loom.Verify with checked shifted accesses" 262144 setupJacobi1D runVerifiedJacobi1D
-  , Benchmark "nbody" "parallel softened all-pairs n-body force accumulation with SoA layout and source tiling" 2048 setupNBody runNBody
-  , Benchmark "matmul" "parallel square matrix multiply" 256 setupMatrix runMatMul
-  , Benchmark "tiled-matmul" "parallel square matrix multiply with tiled traversal" 256 setupMatrix runTiledMatMul
-  , Benchmark "int32-tiled-matmul-scalar" "parallel square Int32 matrix multiply with tiling and scalar inner loops" 256 setupInt32Matrix runInt32TiledMatMulScalar
-  , Benchmark "int32-tiled-matmul-vec" "parallel square Int32 matrix multiply with tiling and SIMD vectorization" 256 setupInt32Matrix runInt32TiledMatMulVectorized
-  , Benchmark "double-matmul-scalar" "parallel square double matrix multiply without tiling or vectorization" 256 setupDoubleMatrix runDoubleMatMulScalar
-  , Benchmark "double-tiled-matmul-scalar" "parallel square double matrix multiply with tiling and scalar inner loops" 256 setupDoubleMatrix runDoubleTiledMatMulScalar
-  , Benchmark "double-tiled-matmul-vec" "parallel square double matrix multiply with tiling and SIMD vectorization" 256 setupDoubleMatrix runDoubleTiledMatMulVectorized
-  , Benchmark "double-tiled-matmul-vec-newapi" "parallel square double matrix multiply with tiling and SIMD vectorization via shape-first Loom API" 256 setupDoubleMatrix runDoubleTiledMatMulVectorizedNewApi
-  , Benchmark "wavefront-edit-distance" "wavefront dynamic-programming edit distance" 1024 setupEditDistance runWavefrontEditDistance
-  , Benchmark "red-black-stencil" "barriered in-place red/black 5-point stencil sweep" 1024 setupImage runRedBlackStencil
-  , Benchmark "normalize-3phase" "three-phase normalization with two reductions and barriers" 1000000 setupDoubleVector runThreePhaseNormalize
-  , Benchmark "separable-blur" "two-pass 2D blur with a barriered scratch handoff" 1024 setupImage runSeparableBlur
+  [ Benchmark "fill" "parallel 1D fill into a fresh array" 1000000 setupFill benchmarkPrepareNone runFillBenchmark validateFillBenchmark
+  , Benchmark "fill-3d" "parallel 3D fill into a fresh volume" 128 setupFill3D benchmarkPrepareNone runFill3DBenchmark validateFill3DBenchmark
+  , Benchmark "map" "parallel 1D elementwise map over two inputs" 1000000 setupBinaryVector benchmarkPrepareNone runMapBenchmark validateMapBenchmark
+  , Benchmark "sum" "parallel reduction over one vector" 1000000 setupUnaryVector benchmarkPrepareNone runSumBenchmark validateSumBenchmark
+  , Benchmark "dot" "parallel dot product over two vectors" 1000000 setupBinaryVector benchmarkPrepareNone runDotBenchmark validateDotBenchmark
+  , Benchmark "jacobi-1d" "vectorized 1D Jacobi / heat-diffusion timesteps with double buffering" 262144 setupJacobi1D benchmarkPrepareJacobi runJacobi1DBenchmark validateJacobi1DBenchmark
+  , Benchmark "verified-jacobi-1d" "vectorized 1D Jacobi via Loom.Verify with checked shifted accesses" 262144 setupJacobi1D benchmarkPrepareJacobi runVerifiedJacobi1DBenchmark validateVerifiedJacobi1DBenchmark
+  , Benchmark "nbody" "parallel softened all-pairs n-body force accumulation with SoA layout and source tiling" 2048 setupNBody benchmarkPrepareNone runNBodyBenchmark validateNBodyBenchmark
+  , Benchmark "matmul" "parallel square matrix multiply" 256 setupMatrix benchmarkPrepareNone runMatMulBenchmark validateMatMulBenchmark
+  , Benchmark "tiled-matmul" "parallel square matrix multiply with tiled traversal" 256 setupMatrix benchmarkPrepareNone runTiledMatMulBenchmark validateTiledMatMulBenchmark
+  , Benchmark "int32-tiled-matmul-scalar" "parallel square Int32 matrix multiply with tiling and scalar inner loops" 256 setupInt32Matrix benchmarkPrepareNone runInt32TiledMatMulScalarBenchmark validateInt32TiledMatMulScalarBenchmark
+  , Benchmark "int32-tiled-matmul-vec" "parallel square Int32 matrix multiply with tiling and SIMD vectorization" 256 setupInt32Matrix benchmarkPrepareNone runInt32TiledMatMulVectorizedBenchmark validateInt32TiledMatMulVectorizedBenchmark
+  , Benchmark "double-matmul-scalar" "parallel square double matrix multiply without tiling or vectorization" 256 setupDoubleMatrix benchmarkPrepareNone runDoubleMatMulScalarBenchmark validateDoubleMatMulScalarBenchmark
+  , Benchmark "double-tiled-matmul-scalar" "parallel square double matrix multiply with tiling and scalar inner loops" 256 setupDoubleMatrix benchmarkPrepareNone runDoubleTiledMatMulScalarBenchmark validateDoubleTiledMatMulScalarBenchmark
+  , Benchmark "double-tiled-matmul-vec" "parallel square double matrix multiply with tiling and SIMD vectorization" 256 setupDoubleMatrix benchmarkPrepareNone runDoubleTiledMatMulVectorizedBenchmark validateDoubleTiledMatMulVectorizedBenchmark
+  , Benchmark "double-tiled-matmul-vec-newapi" "parallel square double matrix multiply with tiling and SIMD vectorization via shape-first Loom API" 256 setupDoubleMatrix benchmarkPrepareNone runDoubleTiledMatMulVectorizedNewApiBenchmark validateDoubleTiledMatMulVectorizedNewApiBenchmark
+  , Benchmark "wavefront-edit-distance" "wavefront dynamic-programming edit distance" 1024 setupEditDistance benchmarkPrepareNone runWavefrontEditDistanceBenchmark validateWavefrontEditDistanceBenchmark
+  , Benchmark "red-black-stencil" "barriered in-place red/black 5-point stencil sweep" 1024 setupImage benchmarkPrepareNone runRedBlackStencilBenchmark validateRedBlackStencilBenchmark
+  , Benchmark "normalize-3phase" "three-phase normalization with two reductions and barriers" 1000000 setupDoubleVector benchmarkPrepareNone runThreePhaseNormalizeBenchmark validateThreePhaseNormalizeBenchmark
+  , Benchmark "separable-blur" "two-pass 2D blur with a barriered scratch handoff" 1024 setupImage benchmarkPrepareNone runSeparableBlurBenchmark validateSeparableBlurBenchmark
   ]
 
 lookupBenchmark :: String -> Maybe Benchmark
@@ -138,8 +168,18 @@ lookupBenchmark target = go benchmarks
       | benchmarkName benchmark == target = Just benchmark
       | otherwise = go rest
 
-setupFill :: Int -> IO Int
-setupFill = pure
+benchmarkPrepareNone :: env -> IO ()
+benchmarkPrepareNone = const (pure ())
+
+setupFill :: Int -> IO FillEnv
+setupFill n = do
+  out <- newArr n
+  pure (FillEnv n out)
+
+setupFill3D :: Int -> IO Fill3DEnv
+setupFill3D n = do
+  out <- newArr (n * n * n)
+  pure (Fill3DEnv n out)
 
 setupUnaryVector :: Int -> IO UnaryEnv
 setupUnaryVector n = do
@@ -150,28 +190,35 @@ setupBinaryVector :: Int -> IO BinaryEnv
 setupBinaryVector n = do
   xs <- seededVector n 17 11
   ys <- seededVector n 31 7
-  pure (BinaryEnv n xs ys)
+  out <- newArr n
+  pure (BinaryEnv n xs ys out)
 
 setupMatrix :: Int -> IO MatrixEnv
 setupMatrix n = do
   a <- seededVector (n * n) 17 11
   b <- seededVector (n * n) 31 7
-  pure (MatrixEnv n a b)
+  out <- newArr (n * n)
+  pure (MatrixEnv n a b out)
 
 setupImage :: Int -> IO ImageEnv
 setupImage n = do
   img <- seededVector (n * n) 17 11
-  pure (ImageEnv n img)
+  out <- newArr (n * n)
+  scratch <- newArr (n * n)
+  pure (ImageEnv n img out scratch)
 
 setupDoubleVector :: Int -> IO DoubleUnaryEnv
 setupDoubleVector n = do
   xs <- seededDoubleVector n 17 11
-  pure (DoubleUnaryEnv n xs)
+  out <- newArr n
+  pure (DoubleUnaryEnv n xs out)
 
 setupJacobi1D :: Int -> IO JacobiEnv
 setupJacobi1D n = do
   xs <- seededDoubleVector n 17 11
-  pure (JacobiEnv n jacobiBenchmarkSteps xs)
+  current <- seededDoubleVector n 17 11
+  scratch <- newArr n
+  pure (JacobiEnv n jacobiBenchmarkSteps xs current scratch)
 
 setupNBody :: Int -> IO NBodyEnv
 setupNBody n = do
@@ -179,25 +226,31 @@ setupNBody n = do
   posY <- seededSignedDoubleVector n 31 7
   posZ <- seededSignedDoubleVector n 43 3
   mass <- seededPositiveDoubleVector n 29 5
-  pure (NBodyEnv n posX posY posZ mass)
+  accX <- newArr n
+  accY <- newArr n
+  accZ <- newArr n
+  pure (NBodyEnv n posX posY posZ mass accX accY accZ)
 
 setupDoubleMatrix :: Int -> IO DoubleMatrixEnv
 setupDoubleMatrix n = do
   a <- seededDoubleVector (n * n) 17 11
   b <- seededDoubleVector (n * n) 31 7
-  pure (DoubleMatrixEnv n a b)
+  out <- newArr (n * n)
+  pure (DoubleMatrixEnv n a b out)
 
 setupInt32Matrix :: Int -> IO Int32MatrixEnv
 setupInt32Matrix n = do
   a <- seededInt32Vector (n * n) 17 11
   b <- seededInt32Vector (n * n) 31 7
-  pure (Int32MatrixEnv n a b)
+  out <- newArr (n * n)
+  pure (Int32MatrixEnv n a b out)
 
 setupEditDistance :: Int -> IO EditDistanceEnv
 setupEditDistance n = do
   left <- seededVector n 17 11
   right <- seededVector n 31 7
-  pure (EditDistanceEnv n n left right)
+  dp <- newArr ((n + 1) * (n + 1))
+  pure (EditDistanceEnv n n left right dp)
 
 seededVector :: Int -> Int -> Int -> IO (Arr Int)
 seededVector n stride offset =
@@ -239,6 +292,325 @@ seededInt32Vector n stride offset =
     [ fromIntegral (((i * stride) + offset) `mod` 257)
     | i <- [0 .. n - 1]
     ]
+
+benchmarkPrepareJacobi :: JacobiEnv -> IO ()
+benchmarkPrepareJacobi env =
+  copyDoubleArrayKernel (jacobiLength env) (jacobiInput env) (jacobiCurrent env)
+
+runFillBenchmark :: FillEnv -> IO BenchmarkRunResult
+runFillBenchmark env =
+  BenchmarkNoChecksum
+    <$ runProg
+      ( parallel $
+          for1 (fillLength env) Schedule.identity $ \i ->
+            writeArr (fillOutput env) i (i * 3 + 1)
+      )
+
+validateFillBenchmark :: FillEnv -> BenchmarkRunResult -> IO Int
+validateFillBenchmark env BenchmarkNoChecksum =
+  sampleVector (fillOutput env) (fillLength env)
+validateFillBenchmark _ (BenchmarkChecksum _) =
+  error "fill benchmark returned an unexpected checksum"
+
+runFill3DBenchmark :: Fill3DEnv -> IO BenchmarkRunResult
+runFill3DBenchmark env =
+  BenchmarkNoChecksum
+    <$ runProg
+      ( parallel $
+          for3 (fill3DLength env) (fill3DLength env) (fill3DLength env) Schedule.identity $ \i j k ->
+            writeArr
+              (fill3DOutput env)
+              ((i * fill3DLength env * fill3DLength env) + (j * fill3DLength env) + k)
+              (i * 1000000 + j * 1000 + k)
+      )
+
+validateFill3DBenchmark :: Fill3DEnv -> BenchmarkRunResult -> IO Int
+validateFill3DBenchmark env BenchmarkNoChecksum =
+  sampleVolume (fill3DOutput env) (fill3DLength env)
+validateFill3DBenchmark _ (BenchmarkChecksum _) =
+  error "fill-3d benchmark returned an unexpected checksum"
+
+runMapBenchmark :: BinaryEnv -> IO BenchmarkRunResult
+runMapBenchmark env =
+  BenchmarkNoChecksum
+    <$ runProg
+      ( parallel $
+          for1 (binaryLength env) Schedule.identity $ \i -> do
+            x <- readArr (binaryLeft env) i
+            y <- readArr (binaryRight env) i
+            writeArr (binaryOutput env) i (x + (2 * y))
+      )
+
+validateMapBenchmark :: BinaryEnv -> BenchmarkRunResult -> IO Int
+validateMapBenchmark env BenchmarkNoChecksum =
+  sampleVector (binaryOutput env) (binaryLength env)
+validateMapBenchmark _ (BenchmarkChecksum _) =
+  error "map benchmark returned an unexpected checksum"
+
+runSumBenchmark :: UnaryEnv -> IO BenchmarkRunResult
+runSumBenchmark env =
+  BenchmarkChecksum
+    <$> runProg
+      ( parallel $
+          newReducer intSum $ \sumVar -> do
+            parFor (unaryLength env) $ \i -> do
+              x <- readArr (unaryInput env) i
+              reduce sumVar x
+            getReducer sumVar
+      )
+
+validateSumBenchmark :: UnaryEnv -> BenchmarkRunResult -> IO Int
+validateSumBenchmark _ (BenchmarkChecksum checksum) = pure checksum
+validateSumBenchmark _ BenchmarkNoChecksum =
+  error "sum benchmark did not return a checksum"
+
+runDotBenchmark :: BinaryEnv -> IO BenchmarkRunResult
+runDotBenchmark env =
+  BenchmarkChecksum
+    <$> runProg
+      ( parallel $
+          newReducer intSum $ \sumVar -> do
+            parFor (binaryLength env) $ \i -> do
+              x <- readArr (binaryLeft env) i
+              y <- readArr (binaryRight env) i
+              reduce sumVar (x * y)
+            getReducer sumVar
+      )
+
+validateDotBenchmark :: BinaryEnv -> BenchmarkRunResult -> IO Int
+validateDotBenchmark _ (BenchmarkChecksum checksum) = pure checksum
+validateDotBenchmark _ BenchmarkNoChecksum =
+  error "dot benchmark did not return a checksum"
+
+runJacobi1DBenchmark :: JacobiEnv -> IO BenchmarkRunResult
+runJacobi1DBenchmark env = do
+  go (jacobiSteps env) (jacobiCurrent env) (jacobiScratch env)
+  pure BenchmarkNoChecksum
+  where
+    n = jacobiLength env
+    go !remaining current next
+      | remaining <= 0 = pure ()
+      | otherwise = do
+          runJacobi1DStepKernel n current next
+          go (remaining - 1) next current
+
+validateJacobi1DBenchmark :: JacobiEnv -> BenchmarkRunResult -> IO Int
+validateJacobi1DBenchmark env BenchmarkNoChecksum =
+  sampleDoubleVector finalBuffer (jacobiLength env)
+  where
+    finalBuffer
+      | even (jacobiSteps env) = jacobiCurrent env
+      | otherwise = jacobiScratch env
+validateJacobi1DBenchmark _ (BenchmarkChecksum _) =
+  error "jacobi benchmark returned an unexpected checksum"
+
+runVerifiedJacobi1DBenchmark :: JacobiEnv -> IO BenchmarkRunResult
+runVerifiedJacobi1DBenchmark env = do
+  let n = jacobiLength env
+      verifiedShape = Verify.shape1 n
+      current = Verify.wrapArray verifiedShape (jacobiCurrent env)
+      scratch = Verify.wrapArray verifiedShape (jacobiScratch env)
+      go !remaining current' next
+        | remaining <= 0 = pure ()
+        | otherwise = do
+            runVerifiedJacobi1DStepKernel n current' next
+            go (remaining - 1) next current'
+  go (jacobiSteps env) current scratch
+  pure BenchmarkNoChecksum
+
+validateVerifiedJacobi1DBenchmark :: JacobiEnv -> BenchmarkRunResult -> IO Int
+validateVerifiedJacobi1DBenchmark env BenchmarkNoChecksum =
+  sampleDoubleVector finalBuffer (jacobiLength env)
+  where
+    finalBuffer
+      | even (jacobiSteps env) = jacobiCurrent env
+      | otherwise = jacobiScratch env
+validateVerifiedJacobi1DBenchmark _ (BenchmarkChecksum _) =
+  error "verified jacobi benchmark returned an unexpected checksum"
+
+runNBodyBenchmark :: NBodyEnv -> IO BenchmarkRunResult
+runNBodyBenchmark env =
+  BenchmarkNoChecksum
+    <$ runNBodyKernel
+      (nbodyCount env)
+      (nbodyPosX env)
+      (nbodyPosY env)
+      (nbodyPosZ env)
+      (nbodyMass env)
+      (nbodyAccX env)
+      (nbodyAccY env)
+      (nbodyAccZ env)
+
+validateNBodyBenchmark :: NBodyEnv -> BenchmarkRunResult -> IO Int
+validateNBodyBenchmark env BenchmarkNoChecksum =
+  sampleDoubleTriples (nbodyAccX env) (nbodyAccY env) (nbodyAccZ env) (nbodyCount env)
+validateNBodyBenchmark _ (BenchmarkChecksum _) =
+  error "nbody benchmark returned an unexpected checksum"
+
+runMatMulBenchmark :: MatrixEnv -> IO BenchmarkRunResult
+runMatMulBenchmark env =
+  BenchmarkNoChecksum
+    <$ runMatMulKernel (matrixDim env) (matrixLeft env) (matrixRight env) (matrixOutput env)
+
+validateMatMulBenchmark :: MatrixEnv -> BenchmarkRunResult -> IO Int
+validateMatMulBenchmark env BenchmarkNoChecksum =
+  sampleMatrix (matrixOutput env) (matrixDim env)
+validateMatMulBenchmark _ (BenchmarkChecksum _) =
+  error "matmul benchmark returned an unexpected checksum"
+
+runTiledMatMulBenchmark :: MatrixEnv -> IO BenchmarkRunResult
+runTiledMatMulBenchmark env =
+  BenchmarkNoChecksum
+    <$ runTiledMatMulKernel (matrixDim env) (matrixLeft env) (matrixRight env) (matrixOutput env)
+
+validateTiledMatMulBenchmark :: MatrixEnv -> BenchmarkRunResult -> IO Int
+validateTiledMatMulBenchmark env BenchmarkNoChecksum =
+  sampleMatrix (matrixOutput env) (matrixDim env)
+validateTiledMatMulBenchmark _ (BenchmarkChecksum _) =
+  error "tiled-matmul benchmark returned an unexpected checksum"
+
+runInt32TiledMatMulScalarBenchmark :: Int32MatrixEnv -> IO BenchmarkRunResult
+runInt32TiledMatMulScalarBenchmark env =
+  BenchmarkNoChecksum
+    <$ runInt32TiledMatMulScalarKernel
+      (int32MatrixDim env)
+      (int32MatrixLeft env)
+      (int32MatrixRight env)
+      (int32MatrixOutput env)
+
+validateInt32TiledMatMulScalarBenchmark :: Int32MatrixEnv -> BenchmarkRunResult -> IO Int
+validateInt32TiledMatMulScalarBenchmark env BenchmarkNoChecksum =
+  sampleInt32Matrix (int32MatrixOutput env) (int32MatrixDim env)
+validateInt32TiledMatMulScalarBenchmark _ (BenchmarkChecksum _) =
+  error "int32-tiled-matmul-scalar benchmark returned an unexpected checksum"
+
+runInt32TiledMatMulVectorizedBenchmark :: Int32MatrixEnv -> IO BenchmarkRunResult
+runInt32TiledMatMulVectorizedBenchmark env =
+  BenchmarkNoChecksum
+    <$ runInt32TiledMatMulVectorizedKernel
+      (int32MatrixDim env)
+      (int32MatrixLeft env)
+      (int32MatrixRight env)
+      (int32MatrixOutput env)
+
+validateInt32TiledMatMulVectorizedBenchmark :: Int32MatrixEnv -> BenchmarkRunResult -> IO Int
+validateInt32TiledMatMulVectorizedBenchmark env BenchmarkNoChecksum =
+  sampleInt32Matrix (int32MatrixOutput env) (int32MatrixDim env)
+validateInt32TiledMatMulVectorizedBenchmark _ (BenchmarkChecksum _) =
+  error "int32-tiled-matmul-vec benchmark returned an unexpected checksum"
+
+runDoubleMatMulScalarBenchmark :: DoubleMatrixEnv -> IO BenchmarkRunResult
+runDoubleMatMulScalarBenchmark env =
+  BenchmarkNoChecksum
+    <$ runDoubleMatMulScalarKernel
+      (doubleMatrixDim env)
+      (doubleMatrixLeft env)
+      (doubleMatrixRight env)
+      (doubleMatrixOutput env)
+
+validateDoubleMatMulScalarBenchmark :: DoubleMatrixEnv -> BenchmarkRunResult -> IO Int
+validateDoubleMatMulScalarBenchmark env BenchmarkNoChecksum =
+  sampleDoubleMatrix (doubleMatrixOutput env) (doubleMatrixDim env)
+validateDoubleMatMulScalarBenchmark _ (BenchmarkChecksum _) =
+  error "double-matmul-scalar benchmark returned an unexpected checksum"
+
+runDoubleTiledMatMulScalarBenchmark :: DoubleMatrixEnv -> IO BenchmarkRunResult
+runDoubleTiledMatMulScalarBenchmark env =
+  BenchmarkNoChecksum
+    <$ runDoubleTiledMatMulScalarKernel
+      (doubleMatrixDim env)
+      (doubleMatrixLeft env)
+      (doubleMatrixRight env)
+      (doubleMatrixOutput env)
+
+validateDoubleTiledMatMulScalarBenchmark :: DoubleMatrixEnv -> BenchmarkRunResult -> IO Int
+validateDoubleTiledMatMulScalarBenchmark env BenchmarkNoChecksum =
+  sampleDoubleMatrix (doubleMatrixOutput env) (doubleMatrixDim env)
+validateDoubleTiledMatMulScalarBenchmark _ (BenchmarkChecksum _) =
+  error "double-tiled-matmul-scalar benchmark returned an unexpected checksum"
+
+runDoubleTiledMatMulVectorizedBenchmark :: DoubleMatrixEnv -> IO BenchmarkRunResult
+runDoubleTiledMatMulVectorizedBenchmark env =
+  BenchmarkNoChecksum
+    <$ runDoubleTiledMatMulVectorizedKernel
+      (doubleMatrixDim env)
+      (doubleMatrixLeft env)
+      (doubleMatrixRight env)
+      (doubleMatrixOutput env)
+
+validateDoubleTiledMatMulVectorizedBenchmark :: DoubleMatrixEnv -> BenchmarkRunResult -> IO Int
+validateDoubleTiledMatMulVectorizedBenchmark env BenchmarkNoChecksum =
+  sampleDoubleMatrix (doubleMatrixOutput env) (doubleMatrixDim env)
+validateDoubleTiledMatMulVectorizedBenchmark _ (BenchmarkChecksum _) =
+  error "double-tiled-matmul-vec benchmark returned an unexpected checksum"
+
+runDoubleTiledMatMulVectorizedNewApiBenchmark :: DoubleMatrixEnv -> IO BenchmarkRunResult
+runDoubleTiledMatMulVectorizedNewApiBenchmark env =
+  BenchmarkNoChecksum
+    <$ runDoubleTiledMatMulVectorizedNewApiKernel
+      (doubleMatrixDim env)
+      (doubleMatrixLeft env)
+      (doubleMatrixRight env)
+      (doubleMatrixOutput env)
+
+validateDoubleTiledMatMulVectorizedNewApiBenchmark :: DoubleMatrixEnv -> BenchmarkRunResult -> IO Int
+validateDoubleTiledMatMulVectorizedNewApiBenchmark env BenchmarkNoChecksum =
+  sampleDoubleMatrix (doubleMatrixOutput env) (doubleMatrixDim env)
+validateDoubleTiledMatMulVectorizedNewApiBenchmark _ (BenchmarkChecksum _) =
+  error "double-tiled-matmul-vec-newapi benchmark returned an unexpected checksum"
+
+runWavefrontEditDistanceBenchmark :: EditDistanceEnv -> IO BenchmarkRunResult
+runWavefrontEditDistanceBenchmark env =
+  BenchmarkNoChecksum
+    <$ runWavefrontEditDistanceKernel
+      (editRows env)
+      (editCols env)
+      (editLeft env)
+      (editRight env)
+      (editDp env)
+
+validateWavefrontEditDistanceBenchmark :: EditDistanceEnv -> BenchmarkRunResult -> IO Int
+validateWavefrontEditDistanceBenchmark env BenchmarkNoChecksum =
+  sampleMatrix (editDp env) (editCols env + 1)
+validateWavefrontEditDistanceBenchmark _ (BenchmarkChecksum _) =
+  error "wavefront-edit-distance benchmark returned an unexpected checksum"
+
+runRedBlackStencilBenchmark :: ImageEnv -> IO BenchmarkRunResult
+runRedBlackStencilBenchmark env =
+  BenchmarkNoChecksum
+    <$ runRedBlackStencilKernel (imageDim env) (imageInput env) (imageOutput env)
+
+validateRedBlackStencilBenchmark :: ImageEnv -> BenchmarkRunResult -> IO Int
+validateRedBlackStencilBenchmark env BenchmarkNoChecksum =
+  sampleMatrix (imageOutput env) (imageDim env)
+validateRedBlackStencilBenchmark _ (BenchmarkChecksum _) =
+  error "red-black-stencil benchmark returned an unexpected checksum"
+
+runThreePhaseNormalizeBenchmark :: DoubleUnaryEnv -> IO BenchmarkRunResult
+runThreePhaseNormalizeBenchmark env =
+  BenchmarkNoChecksum
+    <$ runThreePhaseNormalizeKernel (doubleLength env) (doubleInput env) (doubleOutput env)
+
+validateThreePhaseNormalizeBenchmark :: DoubleUnaryEnv -> BenchmarkRunResult -> IO Int
+validateThreePhaseNormalizeBenchmark env BenchmarkNoChecksum =
+  sampleDoubleVector (doubleOutput env) (doubleLength env)
+validateThreePhaseNormalizeBenchmark _ (BenchmarkChecksum _) =
+  error "normalize-3phase benchmark returned an unexpected checksum"
+
+runSeparableBlurBenchmark :: ImageEnv -> IO BenchmarkRunResult
+runSeparableBlurBenchmark env =
+  BenchmarkNoChecksum
+    <$ runSeparableBlurKernelWithScratch
+      (imageDim env)
+      (imageInput env)
+      (imageScratch env)
+      (imageOutput env)
+
+validateSeparableBlurBenchmark :: ImageEnv -> BenchmarkRunResult -> IO Int
+validateSeparableBlurBenchmark env BenchmarkNoChecksum =
+  sampleMatrix (imageOutput env) (imageDim env)
+validateSeparableBlurBenchmark _ (BenchmarkChecksum _) =
+  error "separable-blur benchmark returned an unexpected checksum"
 
 runFill :: Int -> IO Int
 runFill n = do
@@ -699,48 +1071,16 @@ runVerifiedJacobi1DKernel :: Int -> Int -> Arr Double -> IO (Arr Double)
 runVerifiedJacobi1DKernel steps n src = do
   let verifiedShape = Verify.shape1 n
       srcArray = Verify.wrapArray verifiedShape src
-      copyCurrent srcArr dstArr =
-        Verify.runProg $
-          Verify.parallel $
-            Verify.parFor1D verifiedShape $ \ctx ix -> do
-              x <- Verify.readAt ctx srcArr ix
-              Verify.writeAt ctx dstArr ix x
-      stepKernel prev next =
-        Verify.runProg $
-          Verify.parallel $ do
-            let readCtx = Verify.rectReadAccess1D verifiedShape
-                writeCtx = Verify.rectWriteAccess1D verifiedShape
-                writeVecChunk ix = do
-                  left <- Verify.readDVecOffsetAt1D readCtx prev (-1) ix
-                  center <- Verify.readDVecAt1D readCtx prev ix
-                  right <- Verify.readDVecOffsetAt1D readCtx prev 1 ix
-                  let total = addDVec (addDVec left right) (addDVec center center)
-                  Verify.writeDVecAt1D writeCtx next ix (mulDVec total jacobiWeightVec)
-                writeScalarCell ix = do
-                  left <- Verify.readOffsetAt1D readCtx prev (-1) ix
-                  center <- Verify.readAt readCtx prev ix
-                  right <- Verify.readOffsetAt1D readCtx prev 1 ix
-                  Verify.writeAt writeCtx next ix ((left + center + center + right) * 0.25)
-            first <- Verify.readAt readCtx prev (Verify.rectIx1 0)
-            Verify.writeAt writeCtx next (Verify.rectIx1 0) first
-            if n > 1
-              then do
-                lastValue <- Verify.readAt readCtx prev (Verify.rectIx1 (n - 1))
-                Verify.writeAt writeCtx next (Verify.rectIx1 (n - 1)) lastValue
-              else pure ()
-            let interiorCount = max 0 (n - 2)
-            stripMine vecWidth interiorCount
-              (\offset -> writeVecChunk (Verify.rectIx1 (offset + 1)))
-              (\offset -> writeScalarCell (Verify.rectIx1 (offset + 1)))
-      go !remaining current next
-        | remaining <= 0 = pure (Verify.unwrapArray current)
-        | otherwise = do
-            stepKernel current next
-            go (remaining - 1) next current
   current <- Verify.newArray verifiedShape
   scratch <- Verify.newArray verifiedShape
-  copyCurrent srcArray current
+  copyVerifiedArray verifiedShape srcArray current
   go steps current scratch
+  where
+    go !remaining current next
+      | remaining <= 0 = pure (Verify.unwrapArray current)
+      | otherwise = do
+          runVerifiedJacobi1DStepKernel n current next
+          go (remaining - 1) next current
 
 runJacobi1DStepKernel :: Int -> Arr Double -> Arr Double -> IO ()
 runJacobi1DStepKernel n prev next =
@@ -757,6 +1097,42 @@ runJacobi1DStepKernel n prev next =
       stripMine vecWidth interiorCount
         (\offset -> writeJacobi1DVecChunk prev next (offset + 1))
         (\offset -> writeJacobi1DScalarCell prev next (offset + 1))
+
+runVerifiedJacobi1DStepKernel n prev next =
+  let verifiedShape = Verify.shape1 n
+  in Verify.runProg $
+        Verify.parallel $ do
+          let readCtx = Verify.rectReadAccess1D verifiedShape
+              writeCtx = Verify.rectWriteAccess1D verifiedShape
+              writeVecChunk ix = do
+                left <- Verify.readDVecOffsetAt1D readCtx prev (-1) ix
+                center <- Verify.readDVecAt1D readCtx prev ix
+                right <- Verify.readDVecOffsetAt1D readCtx prev 1 ix
+                let total = addDVec (addDVec left right) (addDVec center center)
+                Verify.writeDVecAt1D writeCtx next ix (mulDVec total jacobiWeightVec)
+              writeScalarCell ix = do
+                left <- Verify.readOffsetAt1D readCtx prev (-1) ix
+                center <- Verify.readAt readCtx prev ix
+                right <- Verify.readOffsetAt1D readCtx prev 1 ix
+                Verify.writeAt writeCtx next ix ((left + center + center + right) * 0.25)
+          first <- Verify.readAt readCtx prev (Verify.rectIx1 0)
+          Verify.writeAt writeCtx next (Verify.rectIx1 0) first
+          if n > 1
+            then do
+              lastValue <- Verify.readAt readCtx prev (Verify.rectIx1 (n - 1))
+              Verify.writeAt writeCtx next (Verify.rectIx1 (n - 1)) lastValue
+            else pure ()
+          let interiorCount = max 0 (n - 2)
+          stripMine vecWidth interiorCount
+            (\offset -> writeVecChunk (Verify.rectIx1 (offset + 1)))
+            (\offset -> writeScalarCell (Verify.rectIx1 (offset + 1)))
+
+copyVerifiedArray verifiedShape src dst =
+  Verify.runProg $
+    Verify.parallel $
+      Verify.parFor1D verifiedShape $ \ctx ix -> do
+        x <- Verify.readAt ctx src ix
+        Verify.writeAt ctx dst ix x
 
 copyDoubleArrayKernel :: Int -> Arr Double -> Arr Double -> IO ()
 copyDoubleArrayKernel n src dst =
@@ -966,31 +1342,29 @@ runRedBlackStencilKernel n src out =
         x <- readArr src idx
         writeArr out idx x
       barrier
-      parForSh2 (sh2 n n) $ \ix ->
-        withIx2 ix $ \i j ->
-          if isInterior n i j && even (i + j)
-            then do
-              center <- readArr out (i * n + j)
-              up <- readArr out ((i - 1) * n + j)
-              down <- readArr out ((i + 1) * n + j)
-              left <- readArr out (i * n + (j - 1))
-              right <- readArr out (i * n + (j + 1))
-              let total = center + up + down + left + right
-              writeArr out (i * n + j) (total `quot` 5)
-            else pure ()
+      parFor2 n n $ \i j ->
+        if isInterior n i j && even (i + j)
+          then do
+            center <- readArr out (i * n + j)
+            up <- readArr out ((i - 1) * n + j)
+            down <- readArr out ((i + 1) * n + j)
+            left <- readArr out (i * n + (j - 1))
+            right <- readArr out (i * n + (j + 1))
+            let total = center + up + down + left + right
+            writeArr out (i * n + j) (total `quot` 5)
+          else pure ()
       barrier
-      parForSh2 (sh2 n n) $ \ix ->
-        withIx2 ix $ \i j ->
-          if isInterior n i j && odd (i + j)
-            then do
-              center <- readArr out (i * n + j)
-              up <- readArr out ((i - 1) * n + j)
-              down <- readArr out ((i + 1) * n + j)
-              left <- readArr out (i * n + (j - 1))
-              right <- readArr out (i * n + (j + 1))
-              let total = center + up + down + left + right
-              writeArr out (i * n + j) (total `quot` 5)
-            else pure ()
+      parFor2 n n $ \i j ->
+        if isInterior n i j && odd (i + j)
+          then do
+            center <- readArr out (i * n + j)
+            up <- readArr out ((i - 1) * n + j)
+            down <- readArr out ((i + 1) * n + j)
+            left <- readArr out (i * n + (j - 1))
+            right <- readArr out (i * n + (j + 1))
+            let total = center + up + down + left + right
+            writeArr out (i * n + j) (total `quot` 5)
+          else pure ()
 
 runThreePhaseNormalizeKernel :: Int -> Arr Double -> Arr Double -> IO ()
 runThreePhaseNormalizeKernel n src out =
@@ -1021,25 +1395,27 @@ runThreePhaseNormalizeKernel n src out =
 runSeparableBlurKernel :: Int -> Arr Int -> Arr Int -> IO ()
 runSeparableBlurKernel n src out = do
   tmp <- newArr (n * n)
+  runSeparableBlurKernelWithScratch n src tmp out
+
+runSeparableBlurKernelWithScratch :: Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
+runSeparableBlurKernelWithScratch n src tmp out =
   runProg $
     parallel $ do
-      parForSh2 (sh2 n n) $ \ix ->
-        withIx2 ix $ \i j -> do
-          let jL = clampIndex n (j - 1)
-              jR = clampIndex n (j + 1)
-          left <- readArr src (i * n + jL)
-          center <- readArr src (i * n + j)
-          right <- readArr src (i * n + jR)
-          writeArr tmp (i * n + j) ((left + center + right) `quot` 3)
+      parFor2 n n $ \i j -> do
+        let jL = clampIndex n (j - 1)
+            jR = clampIndex n (j + 1)
+        left <- readArr src (i * n + jL)
+        center <- readArr src (i * n + j)
+        right <- readArr src (i * n + jR)
+        writeArr tmp (i * n + j) ((left + center + right) `quot` 3)
       barrier
-      parForSh2 (sh2 n n) $ \ix ->
-        withIx2 ix $ \i j -> do
-          let iU = clampIndex n (i - 1)
-              iD = clampIndex n (i + 1)
-          up <- readArr tmp (iU * n + j)
-          center <- readArr tmp (i * n + j)
-          down <- readArr tmp (iD * n + j)
-          writeArr out (i * n + j) ((up + center + down) `quot` 3)
+      parFor2 n n $ \i j -> do
+        let iU = clampIndex n (i - 1)
+            iD = clampIndex n (i + 1)
+        up <- readArr tmp (iU * n + j)
+        center <- readArr tmp (i * n + j)
+        down <- readArr tmp (iD * n + j)
+        writeArr out (i * n + j) ((up + center + down) `quot` 3)
 
 isInterior :: Int -> Int -> Int -> Bool
 isInterior n i j = i > 0 && i + 1 < n && j > 0 && j + 1 < n
