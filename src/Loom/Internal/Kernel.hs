@@ -104,6 +104,7 @@ module Loom.Internal.Kernel
   , parForRect2D
   , parForRows
   , parForRowsRect2D
+  , parForSlices
   , parForCheckerboard
   , parForRectN
   , parForScheduleN
@@ -1890,6 +1891,20 @@ parForRowsRect2D (Rect2 rowLo colLo rowHi colHi) body =
 -- barrier
 -- parForCheckerboard 1 (rect2 1 1 (n-1) (n-1)) $ \\i j -> updateCell i j
 -- @
+-- | Like 'parForRows' but extends to three dimensions: parallelises over all
+-- @depth * rows@ outer @(i, j)@ pairs and runs a tight sequential inner loop
+-- over @k = 0 .. cols-1@.  The sequential k-loop is a join point in the
+-- generated Core, which lets LLVM auto-vectorise it for stride-1 workloads.
+{-# INLINE parForSlices #-}
+parForSlices :: Int -> Int -> Int -> (Int -> Int -> Int -> Prog ()) -> Prog ()
+parForSlices depth rows cols body =
+  parFor2 depth rows $ \i j ->
+    Prog $ \k ->
+      let go !kk
+            | kk >= cols = k ()
+            | otherwise = unProg (body i j kk) (\() -> go (kk + 1))
+       in go 0
+
 {-# INLINE parForCheckerboard #-}
 parForCheckerboard :: Int -> Rect2 -> (Int -> Int -> Prog ()) -> Prog ()
 parForCheckerboard parity (Rect2 rowLo colLo rowHi colHi) body =

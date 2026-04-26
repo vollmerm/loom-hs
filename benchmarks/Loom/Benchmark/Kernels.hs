@@ -23,6 +23,9 @@ module Loom.Benchmark.Kernels
   , runRedBlackStencilExample
   , runThreePhaseNormalizeExample
   , runSeparableBlurExample
+  , runWavefrontLCSExample
+  , runJacobi2DExample
+  , runTiled3DMapExample
   ) where
 
 import Loom
@@ -130,6 +133,29 @@ data EditDistanceEnv = EditDistanceEnv
   , editDp :: !(Arr Int)
   }
 
+data LCSEnv = LCSEnv
+  { lcsRows :: !Int
+  , lcsCols :: !Int
+  , lcsLeft :: !(Arr Int)
+  , lcsRight :: !(Arr Int)
+  , lcsDp :: !(Arr Int)
+  }
+
+data Jacobi2DEnv = Jacobi2DEnv
+  { jacobi2DLength :: !Int
+  , jacobi2DSteps :: !Int
+  , jacobi2DInput :: !(Arr Double)
+  , jacobi2DCurrent :: !(Arr Double)
+  , jacobi2DScratch :: !(Arr Double)
+  }
+
+data Volume3DMapEnv = Volume3DMapEnv
+  { volume3DLength :: !Int
+  , volume3DLeft :: !(Arr Int)
+  , volume3DRight :: !(Arr Int)
+  , volume3DOutput :: !(Arr Int)
+  }
+
 data Force3 =
   Force3
     {-# UNPACK #-} !Double
@@ -158,6 +184,9 @@ benchmarks =
   , Benchmark "red-black-stencil" "barriered in-place red/black 5-point stencil sweep" 1024 setupImage benchmarkPrepareNone runRedBlackStencilBenchmark validateRedBlackStencilBenchmark
   , Benchmark "normalize-3phase" "three-phase normalization with two reductions and barriers" 1000000 setupDoubleVector benchmarkPrepareNone runThreePhaseNormalizeBenchmark validateThreePhaseNormalizeBenchmark
   , Benchmark "separable-blur" "two-pass 2D blur with a barriered scratch handoff" 1024 setupImage benchmarkPrepareNone runSeparableBlurBenchmark validateSeparableBlurBenchmark
+  , Benchmark "wavefront-lcs" "wavefront longest-common-subsequence DP" 1024 setupLCS benchmarkPrepareNone runWavefrontLCSBenchmark validateWavefrontLCSBenchmark
+  , Benchmark "jacobi-2d" "double-buffered 2D Jacobi heat diffusion, 50 steps" 512 setupJacobi2D benchmarkPrepareJacobi2D runJacobi2DBenchmark validateJacobi2DBenchmark
+  , Benchmark "map-3d" "flat 3D elementwise map using parFor3" 128 setupVolume3DMap benchmarkPrepareNone runTiled3DMapBenchmark validateTiled3DMapBenchmark
   ]
 
 lookupBenchmark :: String -> Maybe Benchmark
@@ -252,6 +281,27 @@ setupEditDistance n = do
   dp <- newArr ((n + 1) * (n + 1))
   pure (EditDistanceEnv n n left right dp)
 
+setupLCS :: Int -> IO LCSEnv
+setupLCS n = do
+  left <- seededVector n 17 11
+  right <- seededVector n 31 7
+  dp <- newArr ((n + 1) * (n + 1))
+  pure (LCSEnv n n left right dp)
+
+setupJacobi2D :: Int -> IO Jacobi2DEnv
+setupJacobi2D n = do
+  input <- seededDoubleVector (n * n) 17 11
+  current <- seededDoubleVector (n * n) 17 11
+  scratch <- newArr (n * n)
+  pure (Jacobi2DEnv n jacobi2DBenchmarkSteps input current scratch)
+
+setupVolume3DMap :: Int -> IO Volume3DMapEnv
+setupVolume3DMap n = do
+  left <- seededVector (n * n * n) 17 11
+  right <- seededVector (n * n * n) 31 7
+  out <- newArr (n * n * n)
+  pure (Volume3DMapEnv n left right out)
+
 seededVector :: Int -> Int -> Int -> IO (Arr Int)
 seededVector n stride offset =
   fromList
@@ -296,6 +346,12 @@ seededInt32Vector n stride offset =
 benchmarkPrepareJacobi :: JacobiEnv -> IO ()
 benchmarkPrepareJacobi env =
   copyDoubleArrayKernel (jacobiLength env) (jacobiInput env) (jacobiCurrent env)
+
+benchmarkPrepareJacobi2D :: Jacobi2DEnv -> IO ()
+benchmarkPrepareJacobi2D env = do
+  let n2 = jacobi2DLength env * jacobi2DLength env
+  copyDoubleArrayKernel n2 (jacobi2DInput env) (jacobi2DCurrent env)
+  copyDoubleArrayKernel n2 (jacobi2DInput env) (jacobi2DScratch env)
 
 runFillBenchmark :: FillEnv -> IO BenchmarkRunResult
 runFillBenchmark env =
@@ -611,6 +667,59 @@ validateSeparableBlurBenchmark env BenchmarkNoChecksum =
   sampleMatrix (imageOutput env) (imageDim env)
 validateSeparableBlurBenchmark _ (BenchmarkChecksum _) =
   error "separable-blur benchmark returned an unexpected checksum"
+
+runWavefrontLCSBenchmark :: LCSEnv -> IO BenchmarkRunResult
+runWavefrontLCSBenchmark env =
+  BenchmarkNoChecksum
+    <$ runWavefrontLCSKernel
+      (lcsRows env)
+      (lcsCols env)
+      (lcsLeft env)
+      (lcsRight env)
+      (lcsDp env)
+
+validateWavefrontLCSBenchmark :: LCSEnv -> BenchmarkRunResult -> IO Int
+validateWavefrontLCSBenchmark env BenchmarkNoChecksum =
+  sampleMatrix (lcsDp env) (lcsCols env + 1)
+validateWavefrontLCSBenchmark _ (BenchmarkChecksum _) =
+  error "wavefront-lcs benchmark returned an unexpected checksum"
+
+runJacobi2DBenchmark :: Jacobi2DEnv -> IO BenchmarkRunResult
+runJacobi2DBenchmark env = do
+  go (jacobi2DSteps env) (jacobi2DCurrent env) (jacobi2DScratch env)
+  pure BenchmarkNoChecksum
+  where
+    n = jacobi2DLength env
+    go !remaining !cur !nxt
+      | remaining <= 0 = pure ()
+      | otherwise = do
+          runJacobi2DStepKernel n cur nxt
+          go (remaining - 1) nxt cur
+
+validateJacobi2DBenchmark :: Jacobi2DEnv -> BenchmarkRunResult -> IO Int
+validateJacobi2DBenchmark env BenchmarkNoChecksum =
+  sampleDoubleMatrix finalBuffer (jacobi2DLength env)
+  where
+    finalBuffer
+      | even (jacobi2DSteps env) = jacobi2DCurrent env
+      | otherwise                = jacobi2DScratch env
+validateJacobi2DBenchmark _ (BenchmarkChecksum _) =
+  error "jacobi-2d benchmark returned an unexpected checksum"
+
+runTiled3DMapBenchmark :: Volume3DMapEnv -> IO BenchmarkRunResult
+runTiled3DMapBenchmark env =
+  BenchmarkNoChecksum
+    <$ runTiled3DMapKernel
+      (volume3DLength env)
+      (volume3DLeft env)
+      (volume3DRight env)
+      (volume3DOutput env)
+
+validateTiled3DMapBenchmark :: Volume3DMapEnv -> BenchmarkRunResult -> IO Int
+validateTiled3DMapBenchmark env BenchmarkNoChecksum =
+  sampleVolume (volume3DOutput env) (volume3DLength env)
+validateTiled3DMapBenchmark _ (BenchmarkChecksum _) =
+  error "tiled-3d-map benchmark returned an unexpected checksum"
 
 runFill :: Int -> IO Int
 runFill n = do
@@ -1488,6 +1597,93 @@ polyhedralWavefrontKernel rows cols tableCols left right dp =
 
 min3 :: Int -> Int -> Int -> Int
 min3 x y z = min x (min y z)
+
+jacobi2DBenchmarkSteps :: Int
+jacobi2DBenchmarkSteps = 50
+
+runWavefrontLCSKernel :: Int -> Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
+runWavefrontLCSKernel rows cols left right dp =
+  runProg $
+    parallel $ do
+      let tableCols = cols + 1
+      parFor (rows + 1) $ \i ->
+        writeArr dp (i * tableCols) 0
+      barrier
+      parFor cols $ \j0 ->
+        let j = j0 + 1
+         in writeArr dp j 0
+      barrier
+      parForWavefront2D (sh2 rows cols) $ \ix ->
+        withIx2 ix $ \i0 j0 -> do
+          let i = i0 + 1
+              j = j0 + 1
+              rowBase = i * tableCols
+              prevRowBase = (i - 1) * tableCols
+          x <- readArr left i0
+          y <- readArr right j0
+          if x == y
+            then do
+              diag <- readArr dp (prevRowBase + (j - 1))
+              writeArr dp (rowBase + j) (diag + 1)
+            else do
+              fromUp   <- readArr dp (prevRowBase + j)
+              fromLeft <- readArr dp (rowBase + (j - 1))
+              writeArr dp (rowBase + j) (max fromUp fromLeft)
+
+runJacobi2DStepKernel :: Int -> Arr Double -> Arr Double -> IO ()
+runJacobi2DStepKernel n prev next =
+  runProg $
+    parallel $
+      parForRowsRect2D (rect2 1 1 (n - 1) (n - 1)) $ \i j -> do
+        let idx = i * n + j
+        center <- readArr prev idx
+        up    <- readArr prev (idx - n)
+        down  <- readArr prev (idx + n)
+        lv    <- readArr prev (idx - 1)
+        rv    <- readArr prev (idx + 1)
+        writeArr next idx ((center + up + down + lv + rv) * 0.2)
+
+runTiled3DMapKernel :: Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
+runTiled3DMapKernel n left right out =
+  runProg $
+    parallel $
+      parForSlices n n n $ \i j k -> do
+        let idx = i * n * n + j * n + k
+        x <- readArr left idx
+        y <- readArr right idx
+        writeArr out idx (x + 2 * y)
+
+runWavefrontLCSExample :: [Int] -> [Int] -> IO Int
+runWavefrontLCSExample xs ys = do
+  left <- fromList xs
+  right <- fromList ys
+  let rows = length xs
+      cols = length ys
+      tableCols = cols + 1
+  dp <- newArr ((rows + 1) * tableCols)
+  runWavefrontLCSKernel rows cols left right dp
+  readArrIO dp (rows * tableCols + cols)
+
+runJacobi2DExample :: Int -> Int -> IO Int
+runJacobi2DExample n steps = do
+  input <- seededDoubleVector (n * n) 17 11
+  current <- seededDoubleVector (n * n) 17 11
+  scratch <- newArr (n * n)
+  let go !remaining !cur !nxt
+        | remaining <= 0 = pure cur
+        | otherwise = do
+            runJacobi2DStepKernel n cur nxt
+            go (remaining - 1) nxt cur
+  finalBuf <- go steps current scratch
+  sampleDoubleMatrix finalBuf n
+
+runTiled3DMapExample :: Int -> IO Int
+runTiled3DMapExample n = do
+  left  <- seededVector (n * n * n) 17 11
+  right <- seededVector (n * n * n) 31 7
+  out   <- newArr (n * n * n)
+  runTiled3DMapKernel n left right out
+  sampleVolume out n
 
 sampleVector :: Arr Int -> Int -> IO Int
 sampleVector arr n = do
