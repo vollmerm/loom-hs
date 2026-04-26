@@ -1289,24 +1289,12 @@ runNBodyKernel n posX posY posZ mass accX accY accZ =
         xi <- readArr posX i
         yi <- readArr posY i
         zi <- readArr posZ i
-        let fullTiles = n `quot` sourceTile
-            tailStart = fullTiles * sourceTile
-            tailCount = n - tailStart
-        fullForce <-
-          accumFor fullTiles zeroForce $ \acc tileIdx -> do
-            let j0 = tileIdx * sourceTile
-            tileForce <-
-              accumFor sourceTile zeroForce $ \partial off ->
-                accumulateNBodyForce posX posY posZ mass i xi yi zi partial (j0 + off)
-            pure (addForce3 acc tileForce)
         Force3 ax ay az <-
-          accumFor tailCount fullForce $ \acc off ->
-            accumulateNBodyForce posX posY posZ mass i xi yi zi acc (tailStart + off)
+          accumFor n zeroForce $ \acc j ->
+            accumulateNBodyForce posX posY posZ mass xi yi zi acc j
         writeArr accX i ax
         writeArr accY i ay
         writeArr accZ i az
-  where
-    sourceTile = max 1 (min 64 n)
 
 {-# INLINE zeroForce #-}
 zeroForce :: Force3
@@ -1323,32 +1311,29 @@ accumulateNBodyForce ::
   Arr Double ->
   Arr Double ->
   Arr Double ->
-  Int ->
   Double ->
   Double ->
   Double ->
   Force3 ->
   Int ->
   Prog Force3
-accumulateNBodyForce posX posY posZ mass i xi yi zi (Force3 ax ay az) j
-  | i == j = pure (Force3 ax ay az)
-  | otherwise = do
-      xj <- readArr posX j
-      yj <- readArr posY j
-      zj <- readArr posZ j
-      mj <- readArr mass j
-      let dx = xj - xi
-          dy = yj - yi
-          dz = zj - zi
-          distSq = (dx * dx) + (dy * dy) + (dz * dz) + nbodySoftening
-          invDist = 1.0 / sqrt distSq
-          scale = mj * invDist * invDist * invDist
-      pure
-        ( Force3
-            (ax + (dx * scale))
-            (ay + (dy * scale))
-            (az + (dz * scale))
-        )
+accumulateNBodyForce posX posY posZ mass xi yi zi (Force3 ax ay az) j = do
+  xj <- readArr posX j
+  yj <- readArr posY j
+  zj <- readArr posZ j
+  mj <- readArr mass j
+  let dx = xj - xi
+      dy = yj - yi
+      dz = zj - zi
+      distSq = (dx * dx) + (dy * dy) + (dz * dz) + nbodySoftening
+      invDist = 1.0 / sqrt distSq
+      scale = mj * invDist * invDist * invDist
+  pure
+    ( Force3
+        (ax + (dx * scale))
+        (ay + (dy * scale))
+        (az + (dz * scale))
+    )
 
 nbodySoftening :: Double
 nbodySoftening = 1.0e-9

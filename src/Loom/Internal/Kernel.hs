@@ -588,6 +588,7 @@ instance Loop Kernel where
             then invalidUsage "getReducer may only be used between parallel phases"
             else combineSharedReducer vars workers spec
 
+  {-# INLINE loopAccumFor #-}
   loopAccumFor n initial body = Kernel $ \rt ->
     let go !i !acc
           | i >= n = pure acc
