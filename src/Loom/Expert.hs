@@ -122,6 +122,9 @@ module Loom.Expert
   , parFor2
   , parFor3
   , parForRect2D
+  , parForRows
+  , parForRowsRect2D
+  , parForCheckerboard
   , parForRectN
   , parForScheduleN
   , parForAffineRect2D

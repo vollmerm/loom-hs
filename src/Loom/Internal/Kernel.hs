@@ -102,6 +102,9 @@ module Loom.Internal.Kernel
   , parFor2
   , parFor3
   , parForRect2D
+  , parForRows
+  , parForRowsRect2D
+  , parForCheckerboard
   , parForRectN
   , parForScheduleN
   , parForAffineRect2D
@@ -167,6 +170,7 @@ module Loom.Internal.Kernel
   ) where
 
 import Control.Concurrent (MVar, forkIOWithUnmask, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception (SomeException, bracket, throwIO, try)
 import Control.Monad (ap)
 import Control.Monad.Primitive (primitive)
@@ -198,6 +202,7 @@ import GHC.Exts hiding
   , toList
   )
 import GHC.Int (Int32 (..))
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | A mutable flat primitive array.
 --
@@ -387,6 +392,7 @@ data WorkerHandle = WorkerHandle
 
 data WorkerCommand
   = RunPhase !Phase
+  | RunStaticWork !Int !Int !(Int -> Int -> Int -> IO ())
   | StopWorker
 
 data Phase = Phase
@@ -478,7 +484,7 @@ instance Loop Kernel where
       (Nothing, Nothing, 0) -> do
         caps <- getNumCapabilities
         let !workers = max 1 caps
-        withParallelTeam workers $ \team ->
+        withGlobalTeam workers $ \team ->
           runKernel body (Runtime (Just team) Nothing 0)
       _ ->
         invalidUsage "parallel regions cannot be nested or entered from inside a loop body"
@@ -1842,6 +1848,60 @@ parForRect2D (Rect2 rowLo colLo rowHi colHi) body =
   where
     rect = Rect2 rowLo colLo rowHi colHi
 
+-- | Parallel loop over rows with a sequential inner column loop.
+--
+-- Dispatches one chunk of rows to each parallel worker. Within each worker the
+-- inner @j@ loop runs sequentially, letting GHC hoist row-invariant expressions
+-- (e.g. @i * cols@) out of the inner loop and enabling tighter code generation
+-- than 'parFor2'.
+{-# INLINE parForRows #-}
+parForRows :: Int -> Int -> (Int -> Int -> Prog ()) -> Prog ()
+parForRows rows cols body =
+  parFor rows $ \i ->
+    Prog $ \k ->
+      let go !j
+            | j >= cols = k ()
+            | otherwise = unProg (body i j) (\() -> go (j + 1))
+       in go 0
+
+-- | Like 'parForRows' but iterates over a rectangular subregion.
+{-# INLINE parForRowsRect2D #-}
+parForRowsRect2D :: Rect2 -> (Int -> Int -> Prog ()) -> Prog ()
+parForRowsRect2D (Rect2 rowLo colLo rowHi colHi) body =
+  parFor (rowHi - rowLo) $ \di ->
+    let !i = rowLo + di
+     in Prog $ \k ->
+          let go !j
+                | j >= colHi = k ()
+                | otherwise = unProg (body i j) (\() -> go (j + 1))
+           in go colLo
+
+-- | Parallel checkerboard (red-black) loop.
+--
+-- For each row @i@ in the rectangle, iterates only the columns @j@ where
+-- @(i + j) \`rem\` 2 == parity@, stepping by 2. This eliminates the
+-- branch-per-element overhead of a full 'parForRect2D' with an inline
+-- @if even (i+j)@ guard and halves the number of inner-loop iterations.
+--
+-- Typical usage for a two-phase red-black stencil:
+--
+-- @
+-- parForCheckerboard 0 (rect2 1 1 (n-1) (n-1)) $ \\i j -> updateCell i j
+-- barrier
+-- parForCheckerboard 1 (rect2 1 1 (n-1) (n-1)) $ \\i j -> updateCell i j
+-- @
+{-# INLINE parForCheckerboard #-}
+parForCheckerboard :: Int -> Rect2 -> (Int -> Int -> Prog ()) -> Prog ()
+parForCheckerboard parity (Rect2 rowLo colLo rowHi colHi) body =
+  parFor (rowHi - rowLo) $ \di ->
+    let !i = rowLo + di
+        !startJ = colLo + (i + colLo + parity) `rem` 2
+     in Prog $ \k ->
+          let go !j
+                | j >= colHi = k ()
+                | otherwise = unProg (body i j) (\() -> go (j + 2))
+           in go startJ
+
 {-# INLINE parForRectN #-}
 parForRectN :: RectN -> (IxN -> Prog ()) -> Prog ()
 parForRectN (RectN lo hi) body
@@ -2437,12 +2497,12 @@ dispatchLoop rt total runChunk
               let !workers = min total (max 1 caps)
               if canRunParallelLoop rt workers
                 then
-                  withParallelTeam workers $ \team ->
+                  withGlobalTeam workers $ \team ->
                     runInParallel team (childRt {rtTeam = Just team})
                 else runChunk childRt 0 total
   where
     runInParallel !team !childRt =
-      runParallelPhase team total (chunkSizeFor (teamWorkerCount team) total) $ \workerId start end ->
+      runParallelPhaseStatic team total $ \workerId start end ->
         let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
          in runChunk workerRt start end
 
@@ -2500,6 +2560,7 @@ dispatchFold rt total spec runChunk
                 mergeAll (reducerMerge spec acc partial) (i + 1)
       mergeAll (reducerInit spec) 0
 
+{-# INLINE runLinear2D #-}
 runLinear2D ::
   Runtime ->
   Int# ->
@@ -2530,6 +2591,7 @@ runLinear2D !workerRt m# body start end =
             1# -> go idx'# end# i# j'#
             _ -> go idx'# end# (i# +# 1#) 0#
 
+{-# INLINE runLinear3D #-}
 runLinear3D ::
   Runtime ->
   Int# ->
@@ -2760,6 +2822,27 @@ rationalToIntMaybe q =
 withParallelTeam :: Int -> (Team -> IO a) -> IO a
 withParallelTeam workers = bracket (newParallelTeam workers) stopParallelTeam
 
+-- | Module-level cache for a reusable parallel team.
+--
+-- OpenMP keeps a persistent global thread pool; this does the same. The MVar
+-- serialises concurrent callers (two concurrent @parallel@ regions would
+-- oversubscribe the hardware, so serialising is correct).
+{-# NOINLINE globalParallelTeamVar #-}
+globalParallelTeamVar :: MVar (Maybe Team)
+globalParallelTeamVar = unsafePerformIO (newMVar Nothing)
+
+-- | Acquire the global team (creating or re-creating it if needed), run an
+-- action with it, then return it to the cache.
+withGlobalTeam :: Int -> (Team -> IO a) -> IO a
+withGlobalTeam workers action =
+  modifyMVar globalParallelTeamVar $ \mTeam -> do
+    team <- case mTeam of
+      Just t | teamWorkerCount t == workers -> pure t
+      Just t -> stopParallelTeam t >> newParallelTeam workers
+      Nothing -> newParallelTeam workers
+    result <- action team
+    pure (Just team, result)
+
 newParallelTeam :: Int -> IO Team
 newParallelTeam workers = do
   let !count = max 1 workers
@@ -2784,6 +2867,10 @@ startWorker workerId = do
                 putMVar result (Right ())
               RunPhase phase -> do
                 outcome <- try (unmask (runPhaseWorker phase workerId)) :: IO (Either SomeException ())
+                putMVar result outcome
+                go
+              RunStaticWork start end action -> do
+                outcome <- try (unmask (action workerId start end)) :: IO (Either SomeException ())
                 putMVar result outcome
                 go
        in go
@@ -2811,6 +2898,36 @@ runParallelPhase team end chunkSize runChunk = do
   case firstFailure of
     Just ex -> throwIO ex
     Nothing -> mapM_ (either throwIO pure) results
+
+-- | Like 'runParallelPhase' but uses static pre-partitioned work assignment
+-- instead of dynamic work stealing. Each worker receives exactly one
+-- pre-computed slice [startFor w, startFor (w+1)) with no CAS operations.
+--
+-- Use for uniform-work loops (fills, maps, stencils) where load balance is
+-- guaranteed. This mirrors OpenMP's @schedule(static)@.
+runParallelPhaseStatic :: Team -> Int -> (Int -> Int -> Int -> IO ()) -> IO ()
+runParallelPhaseStatic (Team workers handles) total runChunk
+  | total <= 0 = pure ()
+  | otherwise = do
+      let !q = total `quot` workers
+          !r = total `rem` workers
+          -- First r workers get q+1 elements; the rest get q.
+          startFor !w = w * q + min w r
+      mapM_
+        ( \(w, h) ->
+            putMVar (workerCommand h) (RunStaticWork (startFor w) (startFor (w + 1)) runChunk)
+        )
+        (zip [1 ..] handles)
+      -- Main thread (worker 0)
+      let !s0 = startFor 0; !e0 = startFor 1
+      mainResult <-
+        if s0 < e0
+          then try (runChunk 0 s0 e0) :: IO (Either SomeException ())
+          else pure (Right ())
+      workerResults <- mapM awaitWorkerResult handles
+      case mainResult of
+        Left ex -> throwIO ex
+        Right () -> mapM_ (either throwIO pure) workerResults
 
 runPhaseWorker :: Phase -> Int -> IO ()
 runPhaseWorker phase workerId = go
