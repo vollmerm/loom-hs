@@ -393,7 +393,7 @@ runMapBenchmark env =
   BenchmarkNoChecksum
     <$ runProg
       ( parallel $
-          for1 (binaryLength env) Schedule.identity $ \i -> do
+          parFor (binaryLength env) $ \i -> do
             x <- readArr (binaryLeft env) i
             y <- readArr (binaryRight env) i
             writeArr (binaryOutput env) i (x + (2 * y))
@@ -410,11 +410,8 @@ runSumBenchmark env =
   BenchmarkChecksum
     <$> runProg
       ( parallel $
-          newReducer intSum $ \sumVar -> do
-            parFor (unaryLength env) $ \i -> do
-              x <- readArr (unaryInput env) i
-              reduce sumVar x
-            getReducer sumVar
+          parFoldFor intSum (unaryLength env) $ \i ->
+            readArr (unaryInput env) i
       )
 
 validateSumBenchmark :: UnaryEnv -> BenchmarkRunResult -> IO Int
@@ -427,12 +424,10 @@ runDotBenchmark env =
   BenchmarkChecksum
     <$> runProg
       ( parallel $
-          newReducer intSum $ \sumVar -> do
-            parFor (binaryLength env) $ \i -> do
-              x <- readArr (binaryLeft env) i
-              y <- readArr (binaryRight env) i
-              reduce sumVar (x * y)
-            getReducer sumVar
+          parFoldFor intSum (binaryLength env) $ \i -> do
+            x <- readArr (binaryLeft env) i
+            y <- readArr (binaryRight env) i
+            pure (x * y)
       )
 
 validateDotBenchmark :: BinaryEnv -> BenchmarkRunResult -> IO Int

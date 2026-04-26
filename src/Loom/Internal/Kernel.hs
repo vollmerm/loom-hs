@@ -636,6 +636,7 @@ instance Loop Kernel where
 
   loopWriteAcc (AccVar var) x = Kernel (\_ -> writePrimVar var x)
 
+  {-# INLINE loopFoldFor #-}
   loopFoldFor (Reducer spec) n body = Kernel $ \rt ->
     let go !i !acc
           | i >= n = pure (reducerDone spec acc)
@@ -645,6 +646,7 @@ instance Loop Kernel where
               go (i + 1) acc'
      in go 0 (reducerInit spec)
 
+  {-# INLINE loopParFoldFor #-}
   loopParFoldFor (Reducer spec) n body = Kernel $ \rt ->
     if n <= 0
       then pure (reducerDone spec (reducerInit spec))
@@ -2524,6 +2526,7 @@ dispatchLoop rt total runChunk
 -- | Like 'dispatchLoop' but each worker runs a fold that returns a partial
 -- accumulator. After all workers finish, partial results are combined using
 -- 'reducerMerge' and finalised with 'reducerDone'.
+{-# INLINE dispatchFold #-}
 dispatchFold ::
   Prim rep =>
   Runtime ->
@@ -2555,7 +2558,6 @@ dispatchFold rt total spec runChunk
   where
     runParallelFold !team !childRt = do
       let !workers = teamWorkerCount team
-          !chunkSize = chunkSizeFor workers total
       partials <- newPrimArray workers
       let initSlots !i
             | i >= workers = pure ()
@@ -2563,11 +2565,10 @@ dispatchFold rt total spec runChunk
                 writePrimArray partials i (reducerInit spec)
                 initSlots (i + 1)
       initSlots 0
-      runParallelPhase team total chunkSize $ \workerId start end -> do
+      runParallelPhaseStatic team total $ \workerId start end -> do
         let !workerRt = childRt {rtTeam = Just team, rtWorkerId = Just workerId}
         chunkRep <- runChunk workerRt start end
-        current <- readPrimArray partials workerId
-        writePrimArray partials workerId $! reducerMerge spec current chunkRep
+        writePrimArray partials workerId chunkRep
       let mergeAll !acc !i
             | i >= workers = pure (reducerDone spec acc)
             | otherwise = do
