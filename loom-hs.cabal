@@ -144,10 +144,6 @@ executable loom-benchmarks
         -threaded
         -rtsopts
         -with-rtsopts=-N
-        -optlo--enable-unsafe-fp-math
-        -optlo--enable-no-infs-fp-math
-        -optlo--enable-no-nans-fp-math
-        -optlo--enable-no-signed-zeros-fp-math
 
     build-depends:
         base ^>=4.20.0.0,

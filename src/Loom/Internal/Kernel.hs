@@ -594,7 +594,6 @@ instance Loop Kernel where
             then invalidUsage "getReducer may only be used between parallel phases"
             else combineSharedReducer vars workers spec
 
-  {-# INLINE loopAccumFor #-}
   loopAccumFor n initial body = Kernel $ \rt ->
     let go !i !acc
           | i >= n = pure acc
@@ -1754,10 +1753,10 @@ subDVec (DVec leftLo leftHi) (DVec rightLo rightHi) =
     (minusDoubleX2# leftLo rightLo)
     (minusDoubleX2# leftHi rightHi)
 
-{-# INLINE invSqrtDVec #-}
 -- | Elementwise reciprocal square root of a 'DVec'.
 --
 -- GHC lacks a SIMD sqrt primop, so this unpacks each lane, applies
+{-# INLINE invSqrtDVec #-}
 -- scalar 'sqrtDouble#', and repacks.
 invSqrtDVec :: DVec -> DVec
 invSqrtDVec (DVec lo hi) =
@@ -1771,8 +1770,8 @@ invSqrtDVec (DVec lo hi) =
        (packDoubleX2# (# r0#, r1# #))
        (packDoubleX2# (# r2#, r3# #))
 
-{-# INLINE foldSimdFor4 #-}
 -- | Fold over a range of 'DVec'-sized (4-'Double') chunks with a 'DVec'
+{-# INLINE foldSimdFor4 #-}
 -- accumulator.  Equivalent to 'accumDVecFor'.
 foldSimdFor4 :: Int -> DVec -> (DVec -> Int -> Prog DVec) -> Prog DVec
 foldSimdFor4 = accumDVecFor
