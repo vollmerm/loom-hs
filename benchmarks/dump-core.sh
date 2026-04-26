@@ -12,8 +12,8 @@ cd "$repo_root"
 cabal exec -- ghc \
   -O2 \
   -fllvm \
-  -pgmlo=/opt/homebrew/opt/llvm@16/bin/opt \
-  -pgmlc=/opt/homebrew/opt/llvm@16/bin/llc \
+  -pgmlo="${PGMLO:-opt}" \
+  -pgmlc="${PGMLC:-llc}" \
   -package primitive \
   -fforce-recomp \
   -i./src \

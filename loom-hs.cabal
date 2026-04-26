@@ -62,8 +62,8 @@ common warnings
     ghc-options: -Wall -fllvm
     if os(darwin) && arch(aarch64)
         ghc-options:
-            -pgmlo=/opt/homebrew/opt/llvm@16/bin/opt
-            -pgmlc=/opt/homebrew/opt/llvm@16/bin/llc
+            -pgmlo=opt
+            -pgmlc=llc
 
 library
     -- Import common warning flags.
