@@ -104,6 +104,7 @@ module Loom.Internal.Kernel
   , parForRect2D
   , parForRows
   , parForRowsRect2D
+  , parForSplit2D
   , parForSlices
   , parForCheckerboard
   , parForRectN
@@ -1911,10 +1912,32 @@ parForRowsRect2D (Rect2 rowLo colLo rowHi colHi) body =
   parFor (rowHi - rowLo) $ \di ->
     let !i = rowLo + di
      in Prog $ \k ->
-          let go !j
+           let go !j
                 | j >= colHi = k ()
                 | otherwise = unProg (body i j) (\() -> go (j + 1))
-           in go colLo
+            in go colLo
+
+-- | Split a rectangular 2D loop into a branch-free interior and a separate
+-- boundary traversal.
+{-# INLINE parForSplit2D #-}
+parForSplit2D :: Sh2 -> (Int -> Int -> Prog ()) -> (Int -> Int -> Prog ()) -> Prog ()
+parForSplit2D (Sh2 rows cols) interior boundary
+  | rows <= 0 || cols <= 0 = pure ()
+  | otherwise = do
+      if rows > 2 && cols > 2
+        then parForRowsRect2D (Rect2 1 1 (rows - 1) (cols - 1)) interior
+        else pure ()
+      parForRowsRect2D (Rect2 0 0 1 cols) boundary
+      if rows > 1
+        then parForRowsRect2D (Rect2 (rows - 1) 0 rows cols) boundary
+        else pure ()
+      if rows > 2
+        then do
+          parForRowsRect2D (Rect2 1 0 (rows - 1) 1) boundary
+          if cols > 1
+            then parForRowsRect2D (Rect2 1 (cols - 1) (rows - 1) cols) boundary
+            else pure ()
+        else pure ()
 
 -- | Parallel checkerboard (red-black) loop.
 --

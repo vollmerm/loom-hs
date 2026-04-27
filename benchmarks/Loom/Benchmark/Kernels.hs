@@ -149,6 +149,16 @@ data Jacobi2DEnv = Jacobi2DEnv
   , jacobi2DScratch :: !(Arr Double)
   }
 
+data StencilPipelineEnv = StencilPipelineEnv
+  { stencilPipelineLength :: !Int
+  , stencilPipelineSteps :: !Int
+  , stencilPipelineInput :: !(Arr Double)
+  , stencilPipelineCurrent :: !(Arr Double)
+  , stencilPipelineHorizontal :: !(Arr Double)
+  , stencilPipelineVertical :: !(Arr Double)
+  , stencilPipelineOutput :: !(Arr Double)
+  }
+
 data Volume3DMapEnv = Volume3DMapEnv
   { volume3DLength :: !Int
   , volume3DLeft :: !(Arr Int)
@@ -184,6 +194,7 @@ benchmarks =
   , Benchmark "red-black-stencil" "barriered in-place red/black 5-point stencil sweep" 1024 setupImage benchmarkPrepareNone runRedBlackStencilBenchmark validateRedBlackStencilBenchmark
   , Benchmark "normalize-3phase" "three-phase normalization with two reductions and barriers" 1000000 setupDoubleVector benchmarkPrepareNone runThreePhaseNormalizeBenchmark validateThreePhaseNormalizeBenchmark
   , Benchmark "separable-blur" "two-pass 2D blur with a barriered scratch handoff" 1024 setupImage benchmarkPrepareNone runSeparableBlurBenchmark validateSeparableBlurBenchmark
+  , Benchmark "stencil-pipeline" "multi-stage 2D blur and normalization pipeline with repeated timesteps" 512 setupStencilPipeline benchmarkPrepareStencilPipeline runStencilPipelineBenchmark validateStencilPipelineBenchmark
   , Benchmark "wavefront-lcs" "wavefront longest-common-subsequence DP" 1024 setupLCS benchmarkPrepareNone runWavefrontLCSBenchmark validateWavefrontLCSBenchmark
   , Benchmark "jacobi-2d" "double-buffered 2D Jacobi heat diffusion, 50 steps" 512 setupJacobi2D benchmarkPrepareJacobi2D runJacobi2DBenchmark validateJacobi2DBenchmark
   , Benchmark "map-3d" "flat 3D elementwise map using parFor3" 128 setupVolume3DMap benchmarkPrepareNone runTiled3DMapBenchmark validateTiled3DMapBenchmark
@@ -295,6 +306,15 @@ setupJacobi2D n = do
   scratch <- newArr (n * n)
   pure (Jacobi2DEnv n jacobi2DBenchmarkSteps input current scratch)
 
+setupStencilPipeline :: Int -> IO StencilPipelineEnv
+setupStencilPipeline n = do
+  input <- seededDoubleVector (n * n) 17 11
+  current <- seededDoubleVector (n * n) 17 11
+  horizontal <- newArr (n * n)
+  vertical <- newArr (n * n)
+  output <- newArr (n * n)
+  pure (StencilPipelineEnv n stencilPipelineBenchmarkSteps input current horizontal vertical output)
+
 setupVolume3DMap :: Int -> IO Volume3DMapEnv
 setupVolume3DMap n = do
   left <- seededVector (n * n * n) 17 11
@@ -352,6 +372,12 @@ benchmarkPrepareJacobi2D env = do
   let n2 = jacobi2DLength env * jacobi2DLength env
   copyDoubleArrayKernel n2 (jacobi2DInput env) (jacobi2DCurrent env)
   copyDoubleArrayKernel n2 (jacobi2DInput env) (jacobi2DScratch env)
+
+benchmarkPrepareStencilPipeline :: StencilPipelineEnv -> IO ()
+benchmarkPrepareStencilPipeline env =
+  copyDoubleArrayKernel (stencilPipelineLength env * stencilPipelineLength env)
+    (stencilPipelineInput env)
+    (stencilPipelineCurrent env)
 
 runFillBenchmark :: FillEnv -> IO BenchmarkRunResult
 runFillBenchmark env =
@@ -702,6 +728,31 @@ validateJacobi2DBenchmark env BenchmarkNoChecksum =
       | otherwise                = jacobi2DScratch env
 validateJacobi2DBenchmark _ (BenchmarkChecksum _) =
   error "jacobi-2d benchmark returned an unexpected checksum"
+
+runStencilPipelineBenchmark :: StencilPipelineEnv -> IO BenchmarkRunResult
+runStencilPipelineBenchmark env =
+  BenchmarkNoChecksum
+    <$ runProg
+      ( parallel $
+          go (stencilPipelineSteps env) (stencilPipelineCurrent env) (stencilPipelineOutput env)
+      )
+  where
+    n = stencilPipelineLength env
+    go !remaining !current !output
+      | remaining <= 0 = pure ()
+      | otherwise = do
+          runStencilPipelineStepKernel n current (stencilPipelineHorizontal env) (stencilPipelineVertical env) output
+          go (remaining - 1) output current
+
+validateStencilPipelineBenchmark :: StencilPipelineEnv -> BenchmarkRunResult -> IO Int
+validateStencilPipelineBenchmark env BenchmarkNoChecksum =
+  sampleDoubleMatrix finalBuffer (stencilPipelineLength env)
+  where
+    finalBuffer
+      | even (stencilPipelineSteps env) = stencilPipelineCurrent env
+      | otherwise = stencilPipelineOutput env
+validateStencilPipelineBenchmark _ (BenchmarkChecksum _) =
+  error "stencil-pipeline benchmark returned an unexpected checksum"
 
 runTiled3DMapBenchmark :: Volume3DMapEnv -> IO BenchmarkRunResult
 runTiled3DMapBenchmark env =
@@ -1542,8 +1593,121 @@ runSeparableBlurKernelWithScratch n src tmp out =
         down   <- readArr tmp (dnBase + j)
         writeArr out (base + j) ((up + center + down) `quot` 3)
 
-isInterior :: Int -> Int -> Int -> Bool
-isInterior n i j = i > 0 && i + 1 < n && j > 0 && j + 1 < n
+runStencilPipelineStepKernel :: Int -> Arr Double -> Arr Double -> Arr Double -> Arr Double -> Prog ()
+runStencilPipelineStepKernel n cur horizontal vertical out =
+  newReducer doubleSum $ \sumVar ->
+    newReducer doubleSum $ \sqVar -> do
+      if n > 2
+        then
+          parForRows n (n - 2) $ \i dj -> do
+            let !base = i * n
+                !j = dj + 1
+            left   <- readArr cur (base + j - 1)
+            center <- readArr cur (base + j)
+            right  <- readArr cur (base + j + 1)
+            writeArr horizontal (base + j) ((left + center + right) / 3.0)
+        else pure ()
+      if n > 0
+        then
+          parForRows n 1 $ \i _ -> do
+            let !base = i * n
+            left   <- readArr cur base
+            center <- readArr cur base
+            right  <- readArr cur (base + clampIndex n 1)
+            writeArr horizontal base ((left + center + right) / 3.0)
+        else pure ()
+      if n > 1
+        then
+          parForRows n 1 $ \i _ -> do
+            let !base = i * n
+                !j = n - 1
+            left   <- readArr cur (base + clampIndex n (j - 1))
+            center <- readArr cur (base + j)
+            right  <- readArr cur (base + j)
+            writeArr horizontal (base + j) ((left + center + right) / 3.0)
+        else pure ()
+      barrier
+      if n > 2
+        then
+          parFor (n - 2) $ \di -> do
+            let !i = di + 1
+                !base = i * n
+                !upBase = (i - 1) * n
+                !dnBase = (i + 1) * n
+                go !j !rowTotal !rowSq
+                  | j >= n = do
+                      reduce sumVar rowTotal
+                      reduce sqVar rowSq
+                  | otherwise = do
+                      up     <- readArr horizontal (upBase + j)
+                      center <- readArr horizontal (base + j)
+                      down   <- readArr horizontal (dnBase + j)
+                      let !cell = (up + center + down) / 3.0
+                          !rowTotal' = rowTotal + cell
+                          !rowSq' = rowSq + (cell * cell)
+                      writeArr vertical (base + j) cell
+                      go (j + 1) rowTotal' rowSq'
+            go 0 0 0
+        else pure ()
+      if n > 0
+        then
+          parFor 1 $ \_ -> do
+            let !base = 0
+                !dnBase = n
+                go !j !rowTotal !rowSq
+                  | j >= n = do
+                      reduce sumVar rowTotal
+                      reduce sqVar rowSq
+                  | otherwise = do
+                      up     <- readArr horizontal (base + j)
+                      center <- readArr horizontal (base + j)
+                      down   <- readArr horizontal (dnBase + j)
+                      let !cell = (up + center + down) / 3.0
+                          !rowTotal' = rowTotal + cell
+                          !rowSq' = rowSq + (cell * cell)
+                      writeArr vertical (base + j) cell
+                      go (j + 1) rowTotal' rowSq'
+            go 0 0 0
+        else pure ()
+      if n > 1
+        then
+          parFor 1 $ \_ -> do
+            let !i = n - 1
+                !base = i * n
+                !upBase = (i - 1) * n
+                go !j !rowTotal !rowSq
+                  | j >= n = do
+                      reduce sumVar rowTotal
+                      reduce sqVar rowSq
+                  | otherwise = do
+                      up     <- readArr horizontal (upBase + j)
+                      center <- readArr horizontal (base + j)
+                      down   <- readArr horizontal (base + j)
+                      let !cell = (up + center + down) / 3.0
+                          !rowTotal' = rowTotal + cell
+                          !rowSq' = rowSq + (cell * cell)
+                      writeArr vertical (base + j) cell
+                      go (j + 1) rowTotal' rowSq'
+            go 0 0 0
+        else pure ()
+      barrier
+      total <- getReducer sumVar
+      sqTotal <- getReducer sqVar
+      let !mean = total / fromIntegral (n * n)
+          !variance = sqTotal / fromIntegral (n * n)
+          !invStd
+            | variance <= 0 = 0
+            | otherwise = 1 / sqrt variance
+      parFor n $ \i -> do
+        let !base = i * n
+        let goNormalize !j
+              | j >= n = pure ()
+              | otherwise = do
+                  let !idx = base + j
+                  x <- readArr vertical idx
+                  writeArr out idx ((x - mean) * invStd)
+                  goNormalize (j + 1)
+        goNormalize 0
 
 clampIndex :: Int -> Int -> Int
 clampIndex n i
@@ -1624,6 +1788,9 @@ min3 x y z = min x (min y z)
 
 jacobi2DBenchmarkSteps :: Int
 jacobi2DBenchmarkSteps = 50
+
+stencilPipelineBenchmarkSteps :: Int
+stencilPipelineBenchmarkSteps = 16
 
 runWavefrontLCSKernel :: Int -> Int -> Arr Int -> Arr Int -> Arr Int -> IO ()
 runWavefrontLCSKernel rows cols left right dp =

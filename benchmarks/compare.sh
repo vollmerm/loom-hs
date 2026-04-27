@@ -26,6 +26,7 @@ common_benchmarks=(
   red-black-stencil
   normalize-3phase
   separable-blur
+  stencil-pipeline
   wavefront-lcs
   jacobi-2d
   map-3d
@@ -121,6 +122,7 @@ benchmark_default_size() {
     red-black-stencil) printf '%s\n' 1024 ;;
     normalize-3phase) printf '%s\n' 1000000 ;;
     separable-blur) printf '%s\n' 1024 ;;
+    stencil-pipeline) printf '%s\n' 512 ;;
     wavefront-lcs) printf '%s\n' 1024 ;;
     jacobi-2d) printf '%s\n' 512 ;;
     map-3d) printf '%s\n' 128 ;;

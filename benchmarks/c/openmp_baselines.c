@@ -32,6 +32,7 @@ typedef enum {
   BENCH_RED_BLACK_STENCIL,
   BENCH_NORMALIZE_3PHASE,
   BENCH_SEPARABLE_BLUR,
+  BENCH_STENCIL_PIPELINE,
   BENCH_WAVEFRONT_LCS,
   BENCH_JACOBI_2D,
   BENCH_TILED_3D_MAP
@@ -169,6 +170,17 @@ typedef struct {
 } BlurEnv;
 
 typedef struct {
+  int n;
+  int steps;
+  double *input;
+  double *current;
+  double *horizontal;
+  double *vertical;
+  double *output;
+  double *final_buffer;
+} StencilPipelineEnv;
+
+typedef struct {
   int rows;
   int cols;
   int64_t *left;
@@ -213,6 +225,7 @@ static const benchmark_spec_t benchmark_specs[] = {
     {BENCH_RED_BLACK_STENCIL, "red-black-stencil", "barriered in-place red/black 5-point stencil sweep", 1024},
     {BENCH_NORMALIZE_3PHASE, "normalize-3phase", "three-phase normalization with two reductions and barriers", 1000000},
     {BENCH_SEPARABLE_BLUR, "separable-blur", "two-pass 2D blur with a barriered scratch handoff", 1024},
+    {BENCH_STENCIL_PIPELINE, "stencil-pipeline", "multi-stage 2D blur and normalization pipeline with repeated timesteps", 512},
     {BENCH_WAVEFRONT_LCS, "wavefront-lcs", "wavefront longest-common-subsequence DP", 1024},
     {BENCH_JACOBI_2D, "jacobi-2d", "double-buffered 2D Jacobi heat diffusion, 50 steps", 512},
     {BENCH_TILED_3D_MAP, "map-3d", "flat 3D elementwise map using parFor3", 128},
@@ -846,6 +859,11 @@ static void prepare_jacobi_2d(void *env) {
   memcpy(state->current, state->input, (size_t)state->n * (size_t)state->n * sizeof(double));
 }
 
+static void prepare_stencil_pipeline(void *env) {
+  StencilPipelineEnv *state = (StencilPipelineEnv *)env;
+  memcpy(state->current, state->input, (size_t)state->n * (size_t)state->n * sizeof(double));
+}
+
 static void run_wavefront_lcs(void *env) {
   LCSEnv *state = (LCSEnv *)env;
   kernel_wavefront_lcs(state->rows, state->cols, state->left, state->right, state->dp);
@@ -869,6 +887,94 @@ static void run_jacobi_2d(void *env) {
 
 static checksum_t validate_jacobi_2d(void *env) {
   Jacobi2DEnv *state = (Jacobi2DEnv *)env;
+  return loom_bench_sample_2d_double(state->final_buffer, state->n, state->n);
+}
+
+static void run_stencil_pipeline(void *env) {
+  StencilPipelineEnv *state = (StencilPipelineEnv *)env;
+  double *cur = state->current;
+  double *out = state->output;
+  double total = 0.0;
+  double sq_total = 0.0;
+  double mean = 0.0;
+  double inv_std = 0.0;
+#pragma omp parallel shared(cur, out, total, sq_total, mean, inv_std)
+  {
+    for (int s = 0; s < state->steps; ++s) {
+      #pragma omp single
+      {
+        total = 0.0;
+        sq_total = 0.0;
+        mean = 0.0;
+        inv_std = 0.0;
+      }
+      #pragma omp for schedule(static)
+      for (int i = 0; i < state->n; ++i) {
+        int base = i * state->n;
+        for (int j = 0; j < state->n; ++j) {
+          int jl = clamp_index(state->n, j - 1);
+          int jr = clamp_index(state->n, j + 1);
+          double left = cur[base + jl];
+          double center = cur[base + j];
+          double right = cur[base + jr];
+          state->horizontal[base + j] = (left + center + right) / 3.0;
+        }
+      }
+      #pragma omp barrier
+
+      #pragma omp for schedule(static) reduction(+:total, sq_total)
+      for (int i = 0; i < state->n; ++i) {
+        int base = i * state->n;
+        double row_total = 0.0;
+        double row_sq = 0.0;
+        for (int j = 0; j < state->n; ++j) {
+          int iu = clamp_index(state->n, i - 1);
+          int id = clamp_index(state->n, i + 1);
+          int upBase = iu * state->n;
+          int dnBase = id * state->n;
+          double up = state->horizontal[upBase + j];
+          double center = state->horizontal[base + j];
+          double down = state->horizontal[dnBase + j];
+          double cell = (up + center + down) / 3.0;
+          state->vertical[base + j] = cell;
+          row_total += cell;
+          row_sq += cell * cell;
+        }
+        total += row_total;
+        sq_total += row_sq;
+      }
+      #pragma omp barrier
+
+      #pragma omp single
+      {
+        mean = total / (double)(state->n * state->n);
+        double variance = sq_total / (double)(state->n * state->n);
+        inv_std = variance <= 0.0 ? 0.0 : 1.0 / sqrt(variance);
+      }
+      #pragma omp barrier
+
+      #pragma omp for schedule(static)
+      for (int i = 0; i < state->n; ++i) {
+        int base = i * state->n;
+        for (int j = 0; j < state->n; ++j) {
+          int idx = base + j;
+          out[idx] = (state->vertical[idx] - mean) * inv_std;
+        }
+      }
+      #pragma omp single
+      {
+        double *tmp = cur;
+        cur = out;
+        out = tmp;
+      }
+      #pragma omp barrier
+    }
+  }
+  state->final_buffer = cur;
+}
+
+static checksum_t validate_stencil_pipeline(void *env) {
+  StencilPipelineEnv *state = (StencilPipelineEnv *)env;
   return loom_bench_sample_2d_double(state->final_buffer, state->n, state->n);
 }
 
@@ -1248,6 +1354,26 @@ static report_t run_selected(const benchmark_spec_t *spec, int size, int warmup,
       report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_noop, run_separable_blur, validate_separable_blur);
       free(env.input);
       free(env.scratch);
+      free(env.output);
+      return report;
+    }
+    case BENCH_STENCIL_PIPELINE: {
+      size_t cells = (size_t)size * (size_t)size;
+      StencilPipelineEnv env;
+      env.n = size;
+      env.steps = 16;
+      env.input = loom_bench_alloc_doubles(cells);
+      env.current = loom_bench_alloc_doubles(cells);
+      env.horizontal = loom_bench_alloc_doubles(cells);
+      env.vertical = loom_bench_alloc_doubles(cells);
+      env.output = loom_bench_alloc_doubles(cells);
+      env.final_buffer = NULL;
+      loom_bench_fill_seeded_double(env.input, cells, 17, 11);
+      report_t report = execute_benchmark(spec, size, warmup, iterations, &env, prepare_stencil_pipeline, run_stencil_pipeline, validate_stencil_pipeline);
+      free(env.input);
+      free(env.current);
+      free(env.horizontal);
+      free(env.vertical);
       free(env.output);
       return report;
     }
