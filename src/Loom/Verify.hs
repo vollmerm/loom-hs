@@ -58,6 +58,17 @@ module Loom.Verify
   , toList
   , wrapArray
   , unwrapArray
+    -- * Proof-carrying bound arrays
+  , BoundArr
+  , bindArr
+  , readBound
+  , writeBound
+    -- * Proof-carrying shifted-window access
+  , ShiftedRange1D
+  , proveShiftedRange1D
+  , readBoundOffset1D
+  , readBoundDVecOffset1D
+  , writeBoundDVec1D
     -- * Verified loop forms
   , parFor1D
   , parFor2D

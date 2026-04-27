@@ -111,6 +111,10 @@ Run one benchmark with explicit settings:
 cabal run loom-benchmarks -- double-tiled-matmul-vec --size 256 --warmup 1 --iterations 5
 ```
 
+For Loom vs OpenMP comparison runs, use `benchmarks/compare.sh`.
+To export per-benchmark CSV sweeps, use `benchmarks/compare-csv.sh`; it writes
+files under `benchmarks/data/` with date-based filenames.
+
 ## Core inspection
 
 This library is performance-sensitive. When changing the loop DSL, schedules, transforms, reducers, or benchmark kernels, it is useful to inspect generated Core for representative kernels.

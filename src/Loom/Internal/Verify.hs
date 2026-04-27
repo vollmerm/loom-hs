@@ -31,6 +31,15 @@ module Loom.Internal.Verify
   , toList
   , wrapArray
   , unwrapArray
+  , BoundArr
+  , bindArr
+  , readBound
+  , writeBound
+  , ShiftedRange1D
+  , proveShiftedRange1D
+  , readBoundOffset1D
+  , readBoundDVecOffset1D
+  , writeBoundDVec1D
   , parFor1D
   , parFor2D
   , parFor3D
@@ -280,6 +289,141 @@ wrapArray shape arr
 unwrapArray :: Array rank a -> Arr a
 {-# INLINE unwrapArray #-}
 unwrapArray (Array _ arr) = arr
+
+-- | An array bound to an access context, with shape equality already verified.
+-- Construct via 'bindArr'; the shape check is performed once at construction.
+-- Hot-path read/write functions that take 'BoundArr' skip the per-access
+-- 'checkAccessShape' comparison.
+data BoundArr (cap :: Capability) (sched :: Schedule) (rank :: Rank) a
+  = BoundArrUnchecked !(Shape rank) !(Arr a)
+
+-- | Bind an access context to an array, checking their shapes match once.
+-- The resulting 'BoundArr' can be used with 'readBound' and 'writeBound'
+-- without any further shape checks.
+bindArr ::
+  AccessCtx cap sched rank ->
+  Array rank a ->
+  BoundArr cap sched rank a
+{-# INLINE bindArr #-}
+bindArr ctx (Array arrShape rawArr) =
+  checkAccessShape "bindArr" ctx arrShape `seq`
+    BoundArrUnchecked arrShape rawArr
+
+-- | Read an element through a pre-verified bound array. No shape check.
+readBound ::
+  (Prim a, CanRead cap) =>
+  BoundArr cap sched rank a ->
+  Index sched rank ->
+  Prog a
+{-# INLINE readBound #-}
+readBound (BoundArrUnchecked arrShape rawArr) ix =
+  case arrShape of
+    Shape1 _ _ ->
+      case ix of
+        Index1 rawIx -> readArr rawArr (unIx1 rawIx)
+    Shape2 _ _ _ ->
+      readArr rawArr (index2 (rawShape2 arrShape) (globalIndex2 ix))
+    Shape3 _ _ _ _ ->
+      readArr rawArr (index3 (rawShape3 arrShape) (globalIndex3 ix))
+
+-- | Write an element through a pre-verified bound array. No shape check.
+writeBound ::
+  (Prim a, CanWrite cap) =>
+  BoundArr cap sched rank a ->
+  Index sched rank ->
+  a ->
+  Prog ()
+{-# INLINE writeBound #-}
+writeBound (BoundArrUnchecked arrShape rawArr) ix x =
+  case arrShape of
+    Shape1 _ _ ->
+      case ix of
+        Index1 rawIx -> writeArr rawArr (unIx1 rawIx) x
+    Shape2 _ _ _ ->
+      writeArr rawArr (index2 (rawShape2 arrShape) (globalIndex2 ix)) x
+    Shape3 _ _ _ _ ->
+      writeArr rawArr (index3 (rawShape3 arrShape) (globalIndex3 ix)) x
+
+-- | A proof that for any index produced by a loop over a given range, a
+-- shifted-window access is in-bounds for the target array.
+-- Construct via 'proveShiftedRange1D'; the bounds check is performed once.
+-- Hot-path functions that accept 'ShiftedRange1D' skip the per-access
+-- 'checkShiftedWindow1D' comparison.
+data ShiftedRange1D = ShiftedRange1DProof
+
+-- | Prove that for all indices @ix@ in @[lo, lo+count)@, the window
+-- @[ix + offset, ix + offset + width)@ fits entirely within @[0, n)@,
+-- where @n@ is the extent of the given 1D shape.
+--
+-- Calling this function performs the check once and returns an opaque proof
+-- token. Pass the token to 'readBoundOffset1D', 'readBoundDVecOffset1D', or
+-- 'writeBoundDVec1D' to skip the per-access window check.
+proveShiftedRange1D ::
+  Shape 'Rank1 ->
+  Int ->   -- ^ loop start index (lo)
+  Int ->   -- ^ number of elements (count)
+  Int ->   -- ^ access offset
+  Int ->   -- ^ access width (1 for scalar, vecWidth for DVec)
+  ShiftedRange1D
+{-# INLINE proveShiftedRange1D #-}
+proveShiftedRange1D (Shape1 n _) lo count offset width
+  | count <= 0 = ShiftedRange1DProof
+  | loBase < 0 =
+      error
+        ( "Loom.Verify.proveShiftedRange1D: shifted window starts before the array"
+            ++ " at lo=" ++ show lo ++ " offset=" ++ show offset
+            ++ " width=" ++ show width ++ " extent=" ++ show n
+        )
+  | hiBase + width > n =
+      error
+        ( "Loom.Verify.proveShiftedRange1D: shifted window exceeds the array"
+            ++ " at lo=" ++ show lo ++ " count=" ++ show count
+            ++ " offset=" ++ show offset ++ " width=" ++ show width
+            ++ " extent=" ++ show n
+        )
+  | otherwise = ShiftedRange1DProof
+  where
+    loBase = lo + offset
+    hiBase = lo + count - 1 + offset
+
+-- | Read a scalar element at a constant offset, using a pre-computed range
+-- proof. No per-access bounds check.
+readBoundOffset1D ::
+  (Prim a, CanRead cap) =>
+  ShiftedRange1D ->
+  BoundArr cap 'Rect 'Rank1 a ->
+  Int ->
+  Index 'Rect 'Rank1 ->
+  Prog a
+{-# INLINE readBoundOffset1D #-}
+readBoundOffset1D ShiftedRange1DProof (BoundArrUnchecked _ rawArr) offset (Index1 rawIx) =
+  readArr rawArr (unIx1 rawIx + offset)
+
+-- | Read a 'DVec' at a constant offset, using a pre-computed range proof.
+-- No per-access bounds check.
+readBoundDVecOffset1D ::
+  CanRead cap =>
+  ShiftedRange1D ->
+  BoundArr cap 'Rect 'Rank1 Double ->
+  Int ->
+  Index 'Rect 'Rank1 ->
+  Prog DVec
+{-# INLINE readBoundDVecOffset1D #-}
+readBoundDVecOffset1D ShiftedRange1DProof (BoundArrUnchecked _ rawArr) offset (Index1 rawIx) =
+  readDVec rawArr (unIx1 rawIx + offset)
+
+-- | Write a 'DVec' at the current index, using a pre-computed range proof.
+-- No per-access bounds check.
+writeBoundDVec1D ::
+  CanWrite cap =>
+  ShiftedRange1D ->
+  BoundArr cap 'Rect 'Rank1 Double ->
+  Index 'Rect 'Rank1 ->
+  DVec ->
+  Prog ()
+{-# INLINE writeBoundDVec1D #-}
+writeBoundDVec1D ShiftedRange1DProof (BoundArrUnchecked _ rawArr) (Index1 rawIx) vec =
+  writeDVec rawArr (unIx1 rawIx) vec
 
 -- | Run a verified rectangular 1D loop.
 parFor1D ::

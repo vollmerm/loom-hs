@@ -1254,32 +1254,45 @@ runJacobi1DStepKernel n prev next =
 
 runVerifiedJacobi1DStepKernel n prev next =
   let verifiedShape = Verify.shape1 n
-  in Verify.runProg $
-        Verify.parallel $ do
-          let readCtx = Verify.rectReadAccess1D verifiedShape
-              writeCtx = Verify.rectWriteAccess1D verifiedShape
-              writeVecChunk ix = do
-                left <- Verify.readDVecOffsetAt1D readCtx prev (-1) ix
-                center <- Verify.readDVecAt1D readCtx prev ix
-                right <- Verify.readDVecOffsetAt1D readCtx prev 1 ix
-                let total = addDVec (addDVec left right) (addDVec center center)
-                Verify.writeDVecAt1D writeCtx next ix (mulDVec total jacobiWeightVec)
-              writeScalarCell ix = do
-                left <- Verify.readOffsetAt1D readCtx prev (-1) ix
-                center <- Verify.readAt readCtx prev ix
-                right <- Verify.readOffsetAt1D readCtx prev 1 ix
-                Verify.writeAt writeCtx next ix ((left + center + center + right) * 0.25)
-          first <- Verify.readAt readCtx prev (Verify.rectIx1 0)
-          Verify.writeAt writeCtx next (Verify.rectIx1 0) first
-          if n > 1
-            then do
-              lastValue <- Verify.readAt readCtx prev (Verify.rectIx1 (n - 1))
-              Verify.writeAt writeCtx next (Verify.rectIx1 (n - 1)) lastValue
-            else pure ()
-          let interiorCount = max 0 (n - 2)
-          stripMine vecWidth interiorCount
-            (\offset -> writeVecChunk (Verify.rectIx1 (offset + 1)))
-            (\offset -> writeScalarCell (Verify.rectIx1 (offset + 1)))
+      readCtx       = Verify.rectReadAccess1D  verifiedShape
+      writeCtx      = Verify.rectWriteAccess1D verifiedShape
+      interiorCount = max 0 (n - 2)
+      fullIters     = interiorCount `quot` vecWidth
+      tailStart     = fullIters * vecWidth
+      tailCount     = interiorCount - tailStart
+      -- Full-block DVec accesses visit rawIx in {1, vecWidth+1, ..., (fullIters-1)*vecWidth+1}.
+      -- The range [1, fullBlockHi] (inclusive) conservatively covers all those indices.
+      fullBlockHi   = if fullIters > 0 then (fullIters - 1) * vecWidth + 1 else 0
+      -- Proofs for DVec accesses in the full-block region.
+      proofVecLeft   = Verify.proveShiftedRange1D verifiedShape 1 fullBlockHi (-1) vecWidth
+      proofVecCenter = Verify.proveShiftedRange1D verifiedShape 1 fullBlockHi   0  vecWidth
+      proofVecRight  = Verify.proveShiftedRange1D verifiedShape 1 fullBlockHi   1  vecWidth
+      -- Proofs for scalar accesses in the tail region (offset in {-1, 0, +1}, width 1).
+      proofScalar    = Verify.proveShiftedRange1D verifiedShape (tailStart + 1) tailCount 1 1
+  in Verify.runProg $ Verify.parallel $ do
+       let prevBound = Verify.bindArr readCtx  prev
+           nextBound = Verify.bindArr writeCtx next
+           writeVecChunk ix = do
+             left   <- Verify.readBoundDVecOffset1D proofVecLeft   prevBound (-1) ix
+             center <- Verify.readBoundDVecOffset1D proofVecCenter prevBound   0  ix
+             right  <- Verify.readBoundDVecOffset1D proofVecRight  prevBound   1  ix
+             let total = addDVec (addDVec left right) (addDVec center center)
+             Verify.writeBoundDVec1D proofVecCenter nextBound ix (mulDVec total jacobiWeightVec)
+           writeScalarCell ix = do
+             left   <- Verify.readBoundOffset1D proofScalar prevBound (-1) ix
+             center <- Verify.readBound                     prevBound      ix
+             right  <- Verify.readBoundOffset1D proofScalar prevBound   1  ix
+             Verify.writeBound nextBound ix ((left + center + center + right) * 0.25)
+       first <- Verify.readBound prevBound (Verify.rectIx1 0)
+       Verify.writeBound nextBound (Verify.rectIx1 0) first
+       if n > 1
+         then do
+           lastValue <- Verify.readBound prevBound (Verify.rectIx1 (n - 1))
+           Verify.writeBound nextBound (Verify.rectIx1 (n - 1)) lastValue
+         else pure ()
+       stripMine vecWidth interiorCount
+         (\offset -> writeVecChunk (Verify.rectIx1 (offset + 1)))
+         (\offset -> writeScalarCell (Verify.rectIx1 (offset + 1)))
 
 copyVerifiedArray verifiedShape src dst =
   Verify.runProg $
